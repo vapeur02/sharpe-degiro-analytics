@@ -6,7 +6,7 @@ https://chromewebstore.google.com/detail/sharpe-portfolio-analytic/jfkggpahncfpb
 
 DEGIRO is a fantastic low-cost broker, but its native interface lacks deep insights into how your portfolio is actually performing. If you DCA (Dollar Cost Average) regularly, the default "Total P&L" gets heavily distorted by your cash deposits, making it impossible to benchmark your actual investment decisions.
 
-I built **Sharpe** to fix this. It calculates your True Time-Weighted Returns (TWR), tracks realized P&L, and maps out your exact asset allocation—all locally on your own machine.
+I built **Sharpe** to fix this. It calculates your True Time-Weighted Returns (TWR), tracks realized P&L, and maps out your exact asset allocation, all done locally on your own machine.
 
 ---
 
