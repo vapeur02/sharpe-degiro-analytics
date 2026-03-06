@@ -1,9 +1,8 @@
-# 📈 Sharpe: Portfolio Analytics for DEGIRO
+# Sharpe: Portfolio Analytics for DEGIRO
 <img width="1200" height="400" alt="ko-fi cover" src="https://github.com/user-attachments/assets/4cfe54e5-f2ee-4c5c-8ee0-274316fc15ec" />
 
 **A free, private, and local browser extension that overlays professional portfolio analytics directly onto your DEGIRO account.**
-
-![Sharpe Dashboard Promo]([DRAG AND DROP YOUR MAIN PROMO TILE IMAGE HERE])
+https://chromewebstore.google.com/detail/sharpe-portfolio-analytic/jfkggpahncfpbeeiiadiblbifjnbdlfp?hl=en-GB&utm_source=ext_sidebar
 
 DEGIRO is a fantastic low-cost broker, but its native interface lacks deep insights into how your portfolio is actually performing. If you DCA (Dollar Cost Average) regularly, the default "Total P&L" gets heavily distorted by your cash deposits, making it impossible to benchmark your actual investment decisions.
 
