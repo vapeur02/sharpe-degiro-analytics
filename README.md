@@ -13,14 +13,18 @@ I built **Sharpe** to fix this. It calculates your True Time-Weighted Returns (T
 ## Features
 
 * **True Time-Weighted Returns (TWR):** Accurate performance charts that strip out the distorting effects of your cash deposits and withdrawals.
-* **S&P 500 Benchmarking:** Compare your actual portfolio returns directly against the market.
+* **Advanced Portfolio Analytics:** Professional-grade metrics calculated locally based on your daily portfolio values:
+    * **Annualised Return:** Dynamic annualised performance based on your selected viewing period.
+    * **Alpha & Beta:** Measure your portfolio's exact outperformance (Alpha) and volatility (Beta) benchmarked against the S&P 500.
+    * **Max Drawdown:** Track your largest peak-to-trough portfolio drop.
+    * **Sharpe Ratio:** Understand your risk-adjusted returns.
+* **Transparent Fee Tracking:** See exactly how much you are paying DEGIRO with a complete breakdown of Total Fees paid, split between trading commissions and FX conversion fees.
 * **Realized P&L Tracking:** See your exact historical profits and losses from fully closed (sold) positions using FIFO cost-basis tracking.
 * **Deep Allocation Analytics:** Visualize your portfolio breakdown by:
-    * Geography
-    * Asset Class
-    * Currency
+    *  Geography
+    *  Asset Class
+    *  Currency
 * **Currency (FX) Effects:** Instantly see exactly how exchange rate movements are impacting your non-EUR assets.
-* **Performance Metrics:** View your portfolio's annualized Sharpe Ratio, daily big movers, and total dividends received.
 <img width="1280" height="800" alt="Screenshot tiles" src="https://github.com/user-attachments/assets/8aa1dcbe-f5f5-449d-bdfa-6586cdeae5e4" />
 
 
