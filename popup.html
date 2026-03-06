@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Sharpe</title>
+  <script src="chart.min.js"></script>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="app">
+    <header class="header">
+      <div class="logo">
+        <img src="icons/icon48.png" class="logo-img" alt="Sharpe">
+        <span class="logo-text">Sharpe</span>
+      </div>
+      <div class="header-right">
+        <button class="btn-icon" id="btnFullPage" title="Open full dashboard">⤢</button>
+        <a href="#" id="btnDonate" class="btn-donate" title="Support Sharpe" target="_blank">♡</a>
+        <button class="btn-refresh" id="btnRefresh" title="Refresh">
+          <span class="refresh-icon">↻</span>
+        </button>
+        <div class="status-dot" id="statusDot"></div>
+      </div>
+    </header>
+
+    <div class="loading-screen" id="loadingScreen">
+      <div class="loading-spinner"></div>
+      <p class="loading-text">Fetching your portfolio...</p>
+    </div>
+
+    <div class="no-session" id="noSession" style="display:none">
+      <div class="no-session-icon">⚡</div>
+      <h2>Not connected</h2>
+      <p>Open trader.degiro.nl and log in, then click refresh.</p>
+      <a href="https://trader.degiro.nl" target="_blank" class="btn-primary">Open DEGIRO &rarr;</a>
+    </div>
+
+    <div class="dashboard" id="dashboard" style="display:none">
+      <nav class="tabs">
+        <button class="tab active" data-tab="overview">Overview</button>
+        <button class="tab" data-tab="positions">Positions</button>
+        <button class="tab" data-tab="allocation">Allocation</button>
+        <button class="tab" data-tab="insights">Insights</button>
+      </nav>
+
+      <!-- OVERVIEW TAB -->
+      <div class="tab-content active" id="tab-overview">
+        <div class="summary-grid">
+          <div class="summary-card">
+            <div class="summary-label">Total Value</div>
+            <div class="summary-value" id="totalValue">&#8212;</div>
+          </div>
+          <div class="summary-card summary-card--clickable" id="cardTotalPL" title="Click to open EUR chart">
+            <div class="summary-label">Total P&amp;L</div>
+            <div class="summary-value" id="totalPL">&#8212;</div>
+          </div>
+          <div class="summary-card summary-card--clickable" id="cardTWR" title="Click to open TWR chart">
+            <div class="summary-label">All-time TWR</div>
+            <div class="summary-value" id="totalPLPct">&#8212;</div>
+          </div>
+        </div>
+        <div class="chart-section">
+          <div class="chart-header">
+            <div class="chart-title">Performance <span class="twr-badge" id="twrBadge"></span></div>
+            <div class="period-toggle" id="periodToggle">
+              <button class="period-btn" data-period="6M">6M</button>
+              <button class="period-btn active" data-period="1Y">1Y</button>
+              <button class="period-btn" data-period="3Y">3Y</button>
+            </div>
+          </div>
+          <div class="chart-wrap chart-wrap--perf"><canvas id="perfChartPopup"></canvas></div>
+        </div>
+      </div>
+
+      <!-- POSITIONS TAB -->
+      <div class="tab-content" id="tab-positions">
+        <div class="pos-tab-toggle-wrap">
+          <div class="alloc-toggle" id="posTabToggle">
+            <button class="toggle-btn active" data-postab="open">Open</button>
+            <button class="toggle-btn" data-postab="closed">Closed</button>
+          </div>
+        </div>
+        <div id="positionsListOpen" class="positions-list"></div>
+        <div id="positionsListClosed" class="positions-list" style="display:none"></div>
+      </div>
+
+      <!-- ALLOCATION TAB -->
+      <div class="tab-content" id="tab-allocation">
+        <div class="alloc-toggle-wrap">
+          <div class="alloc-toggle" id="allocToggle">
+            <button class="toggle-btn active" data-alloc="holdings">Holdings</button>
+            <button class="toggle-btn" data-alloc="currency">Currency</button>
+            <button class="toggle-btn" data-alloc="geo">Geography</button>
+            <button class="toggle-btn" data-alloc="asset">Asset Class</button>
+          </div>
+        </div>
+        <div class="chart-wrap"><canvas id="allocationChart"></canvas></div>
+      </div>
+
+      <!-- MORE INSIGHTS TAB -->
+      <div class="tab-content" id="tab-insights">
+        <div class="insights-grid" id="insightsGrid"></div>
+      </div>
+    </div>
+  </div>
+  <script src="utils.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

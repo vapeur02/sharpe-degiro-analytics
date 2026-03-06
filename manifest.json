@@ -1,0 +1,81 @@
+{
+  "manifest_version": 3,
+  "name": "Sharpe: Portfolio Analytics for DEGIRO",
+  "version": "1.4.3",
+  "description": "A secure analytics dashboard for DEGIRO. Track your time-weighted returns, asset allocations, S&P 500 benchmarking, and more!",
+  "permissions": ["storage", "unlimitedStorage", "windows"],
+  "host_permissions": [
+    "https://trader.degiro.nl/*",
+    "https://trader.degiro.ch/*",
+    "https://trader.degiro.co.uk/*",
+    "https://trader.degiro.ie/*",
+    "https://trader.degiro.fr/*",
+    "https://trader.degiro.de/*",
+    "https://trader.degiro.it/*",
+    "https://trader.degiro.es/*",
+    "https://trader.degiro.pl/*",
+    "https://trader.degiro.cz/*",
+    "https://trader.degiro.ro/*",
+    "https://trader.degiro.sk/*",
+    "https://trader.degiro.hu/*",
+    "https://trader.degiro.at/*",
+    "https://trader.degiro.se/*",
+    "https://trader.degiro.dk/*",
+    "https://trader.degiro.fi/*",
+    "https://trader.degiro.no/*",
+    "https://trader.degiro.pt/*",
+    "https://trader.degiro.gr/*",
+    "https://charting.vwdservices.com/*"
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self' https://charting.vwdservices.com https://*.degiro.nl https://*.degiro.ch https://*.degiro.co.uk https://*.degiro.ie https://*.degiro.fr https://*.degiro.de https://*.degiro.it https://*.degiro.es https://*.degiro.pl https://*.degiro.cz https://*.degiro.ro https://*.degiro.sk https://*.degiro.hu https://*.degiro.at https://*.degiro.se https://*.degiro.dk https://*.degiro.fi https://*.degiro.no https://*.degiro.pt https://*.degiro.gr; default-src 'self'"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "content_scripts": [{
+    "matches": [
+      "https://trader.degiro.nl/*",
+      "https://trader.degiro.ch/*",
+      "https://trader.degiro.co.uk/*",
+      "https://trader.degiro.ie/*",
+      "https://trader.degiro.fr/*",
+      "https://trader.degiro.de/*",
+      "https://trader.degiro.it/*",
+      "https://trader.degiro.es/*",
+      "https://trader.degiro.pl/*",
+      "https://trader.degiro.cz/*",
+      "https://trader.degiro.ro/*",
+      "https://trader.degiro.sk/*",
+      "https://trader.degiro.hu/*",
+      "https://trader.degiro.at/*",
+      "https://trader.degiro.se/*",
+      "https://trader.degiro.dk/*",
+      "https://trader.degiro.fi/*",
+      "https://trader.degiro.no/*",
+      "https://trader.degiro.pt/*",
+      "https://trader.degiro.gr/*"
+    ],
+    "js": ["content.js"],
+    "run_at": "document_idle"
+  }],
+  "background": { "service_worker": "background.js" },
+  "web_accessible_resources": [
+    {
+      "resources": ["icons/icon16.png", "icons/icon32.png", "icons/icon48.png", "icons/icon128.png"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

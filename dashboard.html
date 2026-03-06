@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Sharpe — Dashboard</title>
+  <script src="chart.min.js"></script>
+  <link rel="stylesheet" href="dashboard.css">
+</head>
+<body>
+  <header class="header">
+    <div class="logo">
+      <img src="icons/icon48.png" class="logo-img" alt="Sharpe">
+      <span class="logo-text">Sharpe</span>
+    </div>
+    <div class="header-center" id="headerStats"></div>
+    <div class="header-right">
+      <button class="btn-icon" id="btnPrivacy" title="Hide sensitive figures">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+          <circle cx="12" cy="12" r="3"/>
+        </svg>
+      </button>
+      <a href="#" id="btnDonate" class="btn-donate" title="Support Sharpe — keep it free and maintained" target="_blank">♡ Donate</a>
+      <button class="btn-refresh" id="btnRefresh">↻ Refresh</button>
+      <div class="status-dot" id="statusDot"></div>
+    </div>
+  </header>
+
+  <div class="loading-screen" id="loadingScreen">
+    <div class="loading-spinner"></div>
+    <p id="loadingText">Loading your portfolio data...</p>
+    <div class="progress-bar-wrap"><div class="progress-bar" id="progressBar"></div></div>
+    <p class="progress-label" id="progressLabel"></p>
+  </div>
+
+  <main class="main" id="mainContent" style="display:none">
+    <div class="grid-top">
+      <div class="card card--wide">
+        <div class="card-header">
+          <div class="card-title">Capital Appreciation</div>
+          <div class="card-subtitle" id="perfSubtitle"></div>
+          <div class="perf-controls">
+            <select id="periodSelect" class="period-select">
+              <option value="6M">6M</option>
+              <option value="1Y" selected>1Y</option>
+              <option value="2Y">2Y</option>
+              <option value="3Y">3Y</option>
+              <option value="5Y">5Y</option>
+              <option value="ALL">All time</option>
+            </select>
+            <div class="alloc-toggle" id="perfToggle">
+              <button class="toggle-btn active" data-mode="pct">% Return</button>
+              <button class="toggle-btn" data-mode="eur">€ Value</button>
+            </div>
+            <button class="toggle-btn" id="tradesToggle" title="Show buy/sell markers">⇅ Trades</button>
+          </div>
+        </div>
+        <div class="chart-wrap"><canvas id="performanceChart"></canvas></div>
+        <div class="chart-insight-row">
+          <button class="btn-icon btn-insight-toggle" id="insightToggle" title="Toggle chart insights">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M9 18h6M10 22h4M12 2a7 7 0 0 1 7 7c0 2.5-1.3 4.7-3.2 6.1-.5.4-.8.9-.8 1.4V17H9v-.5c0-.5-.3-1-.8-1.4A7 7 0 0 1 12 2z"/>
+            </svg>
+          </button>
+          <div id="chartInsight" class="chart-insight" style="display:none"></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header"><div class="card-title">Allocation</div></div>
+        <div class="chart-wrap"><canvas id="allocationChart"></canvas></div>
+        <div class="legend" id="allocationLegend"></div>
+      </div>
+    </div>
+
+    <div class="grid-bottom grid-bottom--2">
+
+
+
+    </div>
+
+    <div class="card card--full" id="moversCard">
+      <div class="card-header">
+        <div class="card-title">Recent Activity</div>
+        <div class="alloc-toggle" id="moversToggle">
+          <button class="toggle-btn" data-period="1W">1W</button>
+          <button class="toggle-btn active" data-period="1M">1M</button>
+          <button class="toggle-btn" data-period="6M">6M</button>
+          <button class="toggle-btn" data-period="1Y">1Y</button>
+        </div>
+      </div>
+      <div class="movers-row">
+        <div class="movers-col">
+          <div class="movers-col-title">Big Movers</div>
+          <div id="moversContent" class="movers-grid"></div>
+        </div>
+        <div class="movers-col movers-col--chart">
+          <div class="movers-col-title">Portfolio Performance</div>
+          <div class="chart-wrap chart-wrap--perf perf-chart-wrap">
+            <canvas id="recentPerfChart"></canvas>
+            <div class="perf-badge-tip" data-tip="Simple price return of your current holdings over the selected period. Excludes positions you've fully sold."></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card card--full" id="moreInfoCard">
+      <div class="card-header">
+        <div class="card-title">More Insights</div>
+        <button class="toggle-btn" id="btnMoreInfo" title="Show additional portfolio details">⊕ Show details</button>
+      </div>
+      <div id="moreInfoContent" class="more-info-content" style="display:none">
+        <div class="more-info-grid" id="moreInfoGrid">
+          <!-- Populated by JS -->
+        </div>
+        <div class="more-info-note" id="moreInfoNote"></div>
+      </div>
+    </div>
+
+    <div class="card card--full">
+      <div class="card-header">
+        <div class="card-title">Positions</div>
+        <div class="alloc-toggle" id="positionsTabToggle">
+          <button class="toggle-btn active" data-tab="open">Open</button>
+          <button class="toggle-btn" data-tab="closed">Closed</button>
+        </div>
+      </div>
+      <table class="positions-table" id="positionsTable">
+        <thead><tr>
+          <th data-col="name">Name</th><th data-col="currency">Currency</th><th data-col="size">Shares</th><th data-col="price">Price</th><th data-col="value">Value</th><th data-col="pl">P&amp;L</th><th data-col="plpct">P&amp;L %</th>
+        </tr></thead>
+        <tbody id="positionsBody"></tbody>
+      </table>
+      <table class="positions-table" id="closedPositionsTable" style="display:none">
+        <thead><tr>
+          <th data-col="name">Name</th><th data-col="currency">Currency</th><th data-col="sold">Shares sold</th><th data-col="avgBuy">Avg buy</th><th data-col="avgSell">Avg sell</th><th data-col="pl">Realized P&amp;L</th><th data-col="plpct">P&amp;L %</th>
+        </tr></thead>
+        <tbody id="closedPositionsBody"></tbody>
+      </table>
+    </div>
+  </main>
+
+  <footer class="dashboard-footer">
+    <span>Found a bug or have feedback? <a href="mailto:philippe.veldkamp@gmail.com" class="footer-link">Contact us</a></span>
+  </footer>
+
+  <script src="utils.js"></script>
+  <script src="dashboard.js"></script>
+</body>
+</html>
