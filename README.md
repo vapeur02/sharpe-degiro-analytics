@@ -41,7 +41,7 @@ Feel free to audit the code yourself! Every file in this repository is exactly w
 ## Installation
 
 **The Easiest Way (Chrome Web Store):**
-1. [Click here to install Sharpe from the Chrome Web Store](#[](url)
+1. https://chromewebstore.google.com/detail/sharpe-portfolio-analytic/jfkggpahncfpbeeiiadiblbifjnbdlfp?hl=en-GB&utm_source=ext_sidebar
 2. Pin the extension to your toolbar.
 3. Log into `trader.degiro.nl` (or your local DEGIRO domain).
 4. Open the extension to view your dashboard!
