@@ -56,6 +56,7 @@ Feel free to audit the code yourself! Every file in this repository is exactly w
 4. Click **Load unpacked** and select the extracted folder.
 
 *(Note: Firefox support is planned and coming soon!)*
+<img width="1280" height="800" alt="description tile" src="https://github.com/user-attachments/assets/b80f9472-9c26-41dd-8536-84b02bbb9144" />
 
 ---
 
