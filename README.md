@@ -64,7 +64,7 @@ Feel free to audit the code yourself! Every file in this repository is exactly w
 
 DEGIRO frequently updates their platform, which can sometimes break the data extraction. If you notice a bug, a missing closed position, or a calculation error, please [open an issue]([Link to your github issues page]) here on GitHub!
 
-If you want to support the development and maintenance of this free tool, you can [Buy me a coffee]([Your Ko-Fi Link]).
+If you want to support the development and maintenance of this free tool, you can buy me a coffee [https://ko-fi.com/sharpe_dev](https://ko-fi.com/sharpe_dev).
 
 ---
 *Disclaimer: Sharpe is a community-built tool and is not affiliated with, endorsed by, or connected to DEGIRO or flatexDEGIRO Bank AG. All metrics are calculated locally for informational purposes only and do not constitute financial advice.*
