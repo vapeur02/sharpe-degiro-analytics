@@ -97,13 +97,31 @@ function showLoading() {
 function showMain() {
   document.getElementById('loadingScreen').style.display = 'none';
   document.getElementById('mainContent').style.display = 'block';
+  checkPortfolioTab();
+}
+
+// Show warning banner if the last fetch came from a non-portfolio DEGIRO page.
+async function checkPortfolioTab() {
+  const banner = document.getElementById('portfolioWarning');
+  if (!banner) return;
+  try {
+    const stored = await chrome.storage.local.get('currentUrl');
+    const url = stored.currentUrl || '';
+    // Only warn if we have a URL and it's on DEGIRO but not the portfolio tab
+    const onDegiro = url.includes('degiro');
+    const onPortfolio = url.includes('#/portfolio');
+    banner.style.display = (onDegiro && !onPortfolio) ? 'block' : 'none';
+  } catch(e) {
+    banner.style.display = 'none';
+  }
 }
 
 async function renderAll(data) {
   const { meta, vwdIds } = extractProductMeta(data.productInfo);
   const transactions = extractTransactions(data.transactions);
   const positions = extractPositions(data.portfolio, meta, transactions);
-  const dividends = extractDividends(data.dividends);
+  const names = Object.fromEntries(Object.entries(meta).map(([id, m]) => [id, m.name]));
+  const dividends = extractDividends(data.dividends, names);
 
   // Extract net cash value from portfolio — uses the canonical CASH_IDS set
   const cashValue = (() => {
@@ -140,7 +158,7 @@ async function renderAll(data) {
   const scrapedTotalPnL = typeof data.scrapedTotalPnL === 'number' ? data.scrapedTotalPnL : null;
   const scrapedPortfolioValue = typeof data.scrapedPortfolioValue === 'number' ? data.scrapedPortfolioValue : null;
 
-  globalData = { positions, dividends, transactions, vwdIds, data, _cashValue: cashValue, _todayPL: todayPL, _scrapedTotalPnL: scrapedTotalPnL, _scrapedPortfolioValue: scrapedPortfolioValue, names: Object.fromEntries(Object.entries(meta).map(([id, m]) => [id, m.name])) };
+  globalData = { positions, dividends, transactions, vwdIds, data, _cashValue: cashValue, _todayPL: todayPL, _scrapedTotalPnL: scrapedTotalPnL, _scrapedPortfolioValue: scrapedPortfolioValue, names };
 
   setStatus('connected');
 
@@ -167,9 +185,10 @@ async function renderAll(data) {
   renderHeaderStats(positions, dividends);
   renderAllocationChart(positions);
   renderPositionsTable(positions);
-  renderClosedPositionsTable(computeClosedPositions(transactions, globalData.names));
+  renderClosedPositionsTable(computeClosedPositions(transactions, globalData.names, meta));
   wirePositionsTabs();
   renderMoreInfo(positions, dividends, transactions);
+  wireCorrelationToggle();
 
   // Wire up More Info toggle
   const btnMoreInfo = document.getElementById('btnMoreInfo');
@@ -526,6 +545,12 @@ async function renderPerformanceChart({ positions, transactions, vwdIds }) {
       if (!currentHoldings[id]) currentHoldings[id] = 0;
       currentHoldings[id] += tx.buysell === 'B' ? Math.abs(tx.quantity) : -Math.abs(tx.quantity);
       if (currentHoldings[id] < 0.001) delete currentHoldings[id];
+      // Seed fill-forward cache with tx price so the position has a value immediately,
+      // even before VWD price data arrives. Without this, the portfolio value would
+      // exclude the position for days/weeks, then spike when VWD data first appears.
+      if (tx.buysell === 'B' && tx.price > 0 && !lastKnownPrice[id]) {
+        lastKnownPrice[id] = tx.price;
+      }
       hasTx = true;
       txIdx++;
     }
@@ -752,7 +777,8 @@ function drawPerformanceChart(twrSeries, spyData, mode, eurSeries) {
           const days = (new Date(lastDate) - new Date(firstDate)) / (1000 * 60 * 60 * 24);
           const years = days / 365.25;
           const spyStart = spyPriceMap[twrSeries[0]?.date] || spySource.find(d => d.date >= firstDate)?.price;
-          const spyEnd   = spyPriceMap[twrSeries[twrSeries.length - 1]?.date] || null;
+          const lastTwrDate = twrSeries[twrSeries.length - 1]?.date;
+          const spyEnd = spyPriceMap[lastTwrDate] || [...spySource].reverse().find(d => d.date <= lastTwrDate)?.price;
           if (spyStart && spyEnd && years >= 0.08) {
             const spyAnn = (Math.pow(spyEnd / spyStart, 1 / years) - 1) * 100;
             const alpha  = annualisedPct - betaVal * spyAnn;
@@ -1255,14 +1281,14 @@ function renderRecentPerf(positions, histories, period) {
     return res ?? lastSeen[id] ?? null;
   };
 
-  // Find first date where all positions that HAVE data within this period are priced.
-  // Positions added after the period start (no data at all in these histories) are excluded
-  // from the requirement — fill-forward handles them once they appear.
-  // This prevents a recently-bought stock from pulling firstValidDate forward and causing
-  // a near-zero baseline that produces a massive spike on the first bar.
-  const periodStart = dates[0];
+  // Find first date where all positions that CAN be priced at the baseline are priced.
+  // Only require a position if fill-forward can produce a price at the baseline date —
+  // i.e. it has at least one data point on or before dates[0].
+  // Positions bought mid-period (first data after baseline) are excluded from the
+  // requirement and handled via fill-forward once they appear. Without this, a mid-week
+  // purchase would push firstValidDate past the baseline, losing a bar from the chart.
   const posnsWithData = activePosns.filter(p =>
-    histories[p.id]?.some(d => d.date >= periodStart)
+    getFilledPrice(p.id, dates[0]) != null
   );
   const firstValidDate = dates.find(date =>
     posnsWithData.every(p => getFilledPrice(p.id, date) != null)
@@ -1466,9 +1492,10 @@ function drawAllocationChart(positions, mode) {
   }
 
   if (charts.allocation) charts.allocation.destroy();
+  const sliceColors = values.map((_, i) => COLORS[i % COLORS.length]);
   charts.allocation = new Chart(document.getElementById('allocationChart'), {
     type: 'doughnut',
-    data: { labels, datasets: [{ data: values, backgroundColor: COLORS, borderColor: '#15202B', borderWidth: 2 }] },
+    data: { labels, datasets: [{ data: values, backgroundColor: sliceColors, borderColor: '#15202B', borderWidth: 2 }] },
     options: { responsive:true, maintainAspectRatio:false, cutout:'65%',
       plugins: { legend:{display:false}, tooltip:{backgroundColor:'#1E2C3A',borderColor:'#2A3A4A',borderWidth:1,titleColor:'#F5F7FA',bodyColor:'#8B9BB4',padding:10,
         callbacks:{
@@ -1500,7 +1527,7 @@ function renderCurrencyChart(positions) {
   if (charts.currency) charts.currency.destroy();
   charts.currency = new Chart(document.getElementById('currencyChart'), {
     type: 'doughnut',
-    data: { labels: sorted.map(([c])=>c), datasets: [{ data: sorted.map(([,v])=>v), backgroundColor: COLORS, borderColor: '#15202B', borderWidth: 2 }] },
+    data: { labels: sorted.map(([c])=>c), datasets: [{ data: sorted.map(([,v])=>v), backgroundColor: sorted.map((_, i) => COLORS[i % COLORS.length]), borderColor: '#15202B', borderWidth: 2 }] },
     options: { responsive:true, maintainAspectRatio:false, cutout:'60%',
       plugins: { legend:{position:'right',labels:{color:'#8B9BB4',font:{size:11},boxWidth:10,padding:10}},
         tooltip:{backgroundColor:'#1E2C3A',borderColor:'#2A3A4A',borderWidth:1,
@@ -1630,7 +1657,7 @@ function renderPositionsTable(positions, sortCol, sortDir) {
  * Affected tickers historically: TSLA, AAPL, NVDA, AMZN, GOOGL and others.
  * If a user reports a missing or incorrect closed position, a stock split is the likely cause.
  */
-function computeClosedPositions(transactions, names) {
+function computeClosedPositions(transactions, names, meta) {
   const byProduct = {};
   transactions.forEach(tx => {
     const id = tx.productId;
@@ -1648,21 +1675,49 @@ function computeClosedPositions(transactions, names) {
     let totalSellProcEUR = 0;
     let netQty = 0;
 
+    // ── Historical currency effect (realised FX P&L on sold lots) ──
+    // For each matched lot: fxImpact = matchedQty × buyNativePrice × (sellFX − buyFX)
+    // This isolates how much the EUR↔native exchange rate change contributed
+    // to the realised P&L, separate from the product's own price movement.
+    let realizedFxPL = 0;
+
+    // Detect if this product is non-EUR: check meta first, else infer from first buy's FX rate
+    const productCurrency = meta?.[id]?.currency || '';
+    let isNonEUR = productCurrency !== '' && productCurrency !== 'EUR';
+
     sorted.forEach(tx => {
       const qty = Math.abs(tx.quantity);
       const eurPerShare = qty > 0 ? Math.abs(tx.totalInBaseCurrency) / qty : 0;
+      const nativePrice = tx.price;
+      // Implied FX rate: EUR per 1 unit of native currency.
+      // Subtract fees for a cleaner FX rate (fees inflate totalInBaseCurrency).
+      const fees = Math.abs(tx.totalFeesInBaseCurrency || 0) + Math.abs(tx.autoFxFeeInBaseCurrency || 0);
+      const eurExFees = Math.abs(tx.totalInBaseCurrency) - fees;
+      const impliedFX = (nativePrice > 0 && qty > 0 && eurExFees > 0)
+        ? eurExFees / (nativePrice * qty)
+        : 1;
 
       if (tx.buysell === 'B') {
         netQty += qty;
-        buyQueue.push({ qty, eurPerShare });
+        buyQueue.push({ qty, eurPerShare, nativePrice, fx: impliedFX });
+        // If we didn't know the currency, infer from FX rate deviation
+        if (!productCurrency && Math.abs(impliedFX - 1) > 0.05) isNonEUR = true;
       } else {
         netQty -= qty;
+        const sellFX = impliedFX;
         let remaining = qty;
         while (remaining > 0.0001 && buyQueue.length > 0) {
           const lot = buyQueue[0];
           const matched = Math.min(lot.qty, remaining);
           totalBuyCostEUR += matched * lot.eurPerShare;
           totalSoldQty += matched;
+
+          // FX impact on this matched lot:
+          // matchedQty × buyNativePrice × (sellFX − buyFX)
+          if (isNonEUR && lot.nativePrice > 0) {
+            realizedFxPL += matched * lot.nativePrice * (sellFX - lot.fx);
+          }
+
           lot.qty -= matched;
           remaining -= matched;
           if (lot.qty < 0.0001) buyQueue.shift();
@@ -1679,13 +1734,14 @@ function computeClosedPositions(transactions, names) {
       closed.push({
         id,
         name: names?.[id] || 'ID ' + id,
-        currency: 'EUR',
+        currency: productCurrency || 'EUR',
         totalSold: totalSoldQty,
         avgBuyPrice: totalSoldQty > 0 ? totalBuyCostEUR / totalSoldQty : 0,
         avgSellPrice: totalSoldQty > 0 ? totalSellProcEUR / totalSoldQty : 0,
         realizedPL,
         plPct,
         isPartial,
+        realizedFxPL: isNonEUR ? Math.round(realizedFxPL * 100) / 100 : 0,
       });
     }
   });
@@ -1822,13 +1878,25 @@ function renderMoreInfo(positions, dividends, transactions) {
   // ── 2. FX P&L — use p.plFx computed in extractPositions (matches DEGIRO's own P/L Devise) ──
   // Formula: plFx = unrealized − (priceGain × purchaseFX)
   // where purchaseFX = costBasisEUR / (size × breakEvenPrice)
-  let totalFxPL = 0;
+  let unrealizedFxPL = 0;
   let fxPositions = 0;
   positions.forEach(p => {
     if (p.currency === 'EUR') return;
-    totalFxPL += p.plFx || 0;
+    unrealizedFxPL += p.plFx || 0;
     fxPositions++;
   });
+
+  // Historical (realized) FX P&L from closed/partially closed positions
+  const closedPosns = globalData.closedPositions || [];
+  let realizedFxPL = 0;
+  let closedFxCount = 0;
+  closedPosns.forEach(cp => {
+    if (cp.realizedFxPL && cp.realizedFxPL !== 0) {
+      realizedFxPL += cp.realizedFxPL;
+      closedFxCount++;
+    }
+  });
+  const totalFxPL = unrealizedFxPL + realizedFxPL;
 
   // ── 3. Total realized gains ──────────────────────────────────────
   const totalRealized = positions.reduce((s, p) => s + (p.plBase - (p.plUnrealized ?? p.plBase)), 0);
@@ -1853,15 +1921,18 @@ function renderMoreInfo(positions, dividends, transactions) {
   grid.appendChild(makeStat(
     'Dividends received (all-time)',
     (totalDividends >= 0 ? '+' : '') + fmtEur(totalDividends),
-    dividends.length > 0 ? `${dividends.length} payments` : 'No dividend history found',
+    dividends.length > 0 ? `${dividends.length} payments · gross before tax` : 'No dividend history found',
     totalDividends > 0 ? 'positive' : ''
   ));
 
-  // Currency effect stat
-  const fxTooltip = 'Impact of exchange rate movements separate from product performance.';
+  // Currency effect stat — combines unrealized (open positions) + realized (sold lots)
+  const fxTooltip = 'Impact of exchange rate movements separate from product performance. Includes both open and closed positions.';
   const fxClass = totalFxPL >= 0 ? 'positive' : 'negative';
-  const fxSub = fxPositions > 0
-    ? `Across ${fxPositions} non-EUR position${fxPositions > 1 ? 's' : ''} · unrealized only`
+  const fxParts = [];
+  if (fxPositions > 0) fxParts.push(`${(unrealizedFxPL >= 0 ? '+' : '') + fmtEur(unrealizedFxPL)} unrealized`);
+  if (closedFxCount > 0) fxParts.push(`${(realizedFxPL >= 0 ? '+' : '') + fmtEur(realizedFxPL)} realized`);
+  const fxSub = fxParts.length > 0
+    ? fxParts.join(' · ')
     : 'No non-EUR positions';
   grid.appendChild(makeStat(
     'Currency effect',
@@ -1977,3 +2048,558 @@ function setStatus(s) {
   d.className = 'status-dot' + (s==='connected'?' connected':s==='loading'?' loading':'');
 }
 // fmtEur, fmtMonth, normalizeDate, inferGeo, inferAssetClass etc. are in utils.js
+
+// ── Correlation Matrix ─────────────────────────────────────────────────────
+
+async function renderCorrelationMatrix(positions, vwdIds, names) {
+  const wrap = document.getElementById('correlationHeatmap');
+  if (!wrap) return;
+
+  // Filter to open positions that have a vwdId
+  // NOTE: positions use `size` (not `qty`) for share count — see extractPositions() in utils.js
+  const openIds = positions
+    .filter(p => p.size > 0 && vwdIds[p.id])
+    .map(p => p.id);
+
+  if (openIds.length < 2) {
+    wrap.innerHTML = '<p style="color:var(--muted);font-size:12px;padding:12px 0;">Need at least 2 open positions to show a correlation matrix.</p>';
+    return;
+  }
+
+  wrap.innerHTML = '<p style="color:var(--muted);font-size:11px;padding:8px 0;">Loading price histories…</p>';
+
+  // Fetch full 5Y history (same cache used by performance chart — free hit)
+  const histories = await chrome.runtime.sendMessage({ type: 'FETCH_PRICE_HISTORY', vwdIds, period: '5Y' });
+
+  // Build aligned daily-return series for each position
+  // 1. Collect all dates across all positions
+  const dateSet = new Set();
+  const rawPrices = {}; // id -> Map(date -> price)
+  for (const id of openIds) {
+    const series = histories[id];
+    if (!series || series.length < 5) continue;
+    rawPrices[id] = new Map(series.map(d => [d.date, d.price]));
+    series.forEach(d => dateSet.add(d.date));
+  }
+
+  const validIds = openIds.filter(id => rawPrices[id]);
+  if (validIds.length < 2) {
+    wrap.innerHTML = '<p style="color:var(--muted);font-size:12px;padding:12px 0;">Not enough price history available to compute correlations.</p>';
+    return;
+  }
+
+  // 2. Sort all dates, compute daily returns per asset
+  const allDates = [...dateSet].sort();
+  const returns = {}; // id -> number[]
+  for (const id of validIds) {
+    const priceMap = rawPrices[id];
+    const ret = [];
+    for (let i = 1; i < allDates.length; i++) {
+      const prev = priceMap.get(allDates[i - 1]);
+      const curr = priceMap.get(allDates[i]);
+      if (prev != null && curr != null && prev > 0) {
+        ret.push(curr / prev - 1);
+      } else {
+        ret.push(null); // mark as missing
+      }
+    }
+    returns[id] = ret;
+  }
+
+  // 3. Compute Pearson correlation for each pair using only dates where both have data
+  function pearson(a, b) {
+    const pairs = [];
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] !== null && b[i] !== null) pairs.push([a[i], b[i]]);
+    }
+    const n = pairs.length;
+    if (n < 10) return null;
+    const meanA = pairs.reduce((s, p) => s + p[0], 0) / n;
+    const meanB = pairs.reduce((s, p) => s + p[1], 0) / n;
+    let num = 0, da = 0, db = 0;
+    for (const [x, y] of pairs) {
+      const dx = x - meanA, dy = y - meanB;
+      num += dx * dy;
+      da  += dx * dx;
+      db  += dy * dy;
+    }
+    const denom = Math.sqrt(da * db);
+    return denom === 0 ? null : Math.min(1, Math.max(-1, num / denom));
+  }
+
+  const matrix = {}; // matrix[idA][idB] = corr
+  for (const a of validIds) {
+    matrix[a] = {};
+    for (const b of validIds) {
+      matrix[a][b] = a === b ? 1.0 : pearson(returns[a], returns[b]);
+    }
+  }
+
+  // 4. Color scale: -1 = vivid green, 0 = dark neutral, +1 = vivid red
+  //    Uses a power curve (t^0.6) so mid-range values already show real colour
+  //    instead of fading into the dark background.
+  //    Endpoints: +1 → #E05252 (bright red)  -1 → #2ECC71 (bright green)
+  function corrColor(v) {
+    if (v === null) return 'var(--bg3)';
+    const c = Math.max(-1, Math.min(1, v));
+    const absC = Math.abs(c);
+    const t = Math.pow(absC, 0.6); // push saturation harder at mid-range
+    if (c >= 0) {
+      // neutral → vivid red (#E05252)
+      return `rgb(${Math.round(30 + t * (224 - 30))},${Math.round(44 + t * (82 - 44))},${Math.round(58 + t * (82 - 58))})`;
+    } else {
+      // neutral → vivid green (#2ECC71)
+      return `rgb(${Math.round(30 + t * (46 - 30))},${Math.round(44 + t * (204 - 44))},${Math.round(58 + t * (113 - 58))})`;
+    }
+  }
+
+  function textColor(v) {
+    if (v === null) return 'var(--muted)';
+    return Math.abs(v) > 0.15 ? '#F5F7FA' : '#C0C8D4';
+  }
+
+  // 5. Build table
+  const fullName = id => names[id] || id;
+
+  // Smart algorithmic abbreviation — strips ETF boilerplate (provider names, UCITS, currency
+  // codes, Acc/Dist suffixes) to expose the meaningful core descriptor.
+  // No hardcoded per-asset lookup: purely pattern-based so it works for any portfolio.
+  function abbreviate(raw) {
+    if (!raw) return '';
+    let s = raw.trim();
+    // Strip leading fund-provider prefixes (common across EU/US markets)
+    s = s.replace(/^(iShares(\s+Core)?|Vanguard|SPDR|Xtrackers|Amundi(\s+IS)?|Lyxor|WisdomTree|Invesco|Franklin(\s+Templeton)?|PIMCO|Fidelity|BlackRock|Northern\s+Trust|DWS|HSBC|L&G|Legal\s+&\s+General|Ossiam|Tabula|VanEck|First\s+Trust|Global\s+X|Direxion|ProShares|ARK|Grayscale)\s+/i, '');
+    // Strip trailing boilerplate: UCITS ETF / ETF, then optional currency + Acc/Dist
+    s = s.replace(/\s+(UCITS\s+ETF|UCITS|ETF)(\s+(\w{2,3}|\(\w+\)))*\s*$/i, '');
+    s = s.replace(/\s+\((Acc|Dist|Hedged|H)\)\s*$/i, '');
+    s = s.replace(/\s+(USD|EUR|GBP|CHF|JPY|NOK|SEK|DKK)\s*$/i, '');
+    s = s.trim();
+    return s || raw.trim();
+  }
+
+  const table = document.createElement('table');
+  table.className = 'correlation-table';
+
+  // Header row
+  const thead = table.createTHead();
+  const headerRow = thead.insertRow();
+  // Empty corner cell (sits above the row-label column)
+  const corner = document.createElement('th');
+  corner.className = 'row-label';
+  headerRow.appendChild(corner);
+  for (const id of validIds) {
+    const th = document.createElement('th');
+    th.className = 'col-header-cell';
+    // Wrapper div sets the height; inner span is rotated -45°
+    const outer = document.createElement('div');
+    outer.className = 'col-label-outer';
+    const label = document.createElement('span');
+    label.className = 'col-label-text';
+    label.textContent = abbreviate(fullName(id));
+    label.title = fullName(id);
+    outer.appendChild(label);
+    th.appendChild(outer);
+    headerRow.appendChild(th);
+  }
+
+  // Data rows
+  const tbody = table.createTBody();
+  for (const rowId of validIds) {
+    const tr = tbody.insertRow();
+    // Row label — same abbreviation logic, full name on hover
+    const th = document.createElement('th');
+    th.className = 'row-label';
+    th.textContent = abbreviate(fullName(rowId));
+    th.title = fullName(rowId);
+    tr.appendChild(th);
+
+    for (const colId of validIds) {
+      const td = tr.insertCell();
+      const v = matrix[rowId][colId];
+      td.style.background = corrColor(v);
+      td.style.color = textColor(v);
+      td.textContent = v !== null ? v.toFixed(2) : '—';
+      if (rowId === colId) td.classList.add('corr-diag');
+
+      // Tooltip data — use abbreviated names for readability
+      td.dataset.rowName = abbreviate(fullName(rowId));
+      td.dataset.colName = abbreviate(fullName(colId));
+      td.dataset.corr    = v !== null ? v.toFixed(4) : 'N/A';
+    }
+  }
+
+  wrap.innerHTML = '';
+  wrap.appendChild(table);
+
+  // 6. Summary stat boxes — WAC + PCA side by side
+  const posMap = {}; // id → position object
+  for (const p of positions) posMap[p.id] = p;
+  const totalValue = validIds.reduce((s, id) => s + (posMap[id]?.value || 0), 0);
+
+  if (totalValue > 0 && validIds.length >= 2) {
+    // Grid container for the two stat boxes
+    const statsGrid = document.createElement('div');
+    statsGrid.className = 'corr-stats-grid';
+
+    // ── WAC ────────────────────────────────────────────────────────
+    //    WAC = Σ(wi × wj × ρij) / Σ(wi × wj) for all i ≠ j
+    let wacNum = 0, wacDen = 0;
+    for (let i = 0; i < validIds.length; i++) {
+      const wi = (posMap[validIds[i]]?.value || 0) / totalValue;
+      for (let j = i + 1; j < validIds.length; j++) {
+        const wj = (posMap[validIds[j]]?.value || 0) / totalValue;
+        const rho = matrix[validIds[i]][validIds[j]];
+        if (rho !== null) {
+          const w = wi * wj;
+          wacNum += w * rho;
+          wacDen += w;
+        }
+      }
+    }
+    const wac = wacDen > 0 ? wacNum / wacDen : null;
+
+    if (wac !== null) {
+      const wacBox = document.createElement('div');
+      wacBox.className = 'more-info-stat more-info-stat--tip';
+      wacBox.dataset.tip =
+        'Weighted Average Correlation: How correlated your portfolio is, ' +
+        'weighted by position size. Pairs with larger combined weight count more. ' +
+        'Below 0.3 is well-diversified, 0.3 to 0.6 is moderate, above 0.6 is concentrated.';
+
+      function wacColor(v) {
+        if (v < 0.3)  return '#2ECC71';
+        if (v <= 0.6) return '#F5F7FA';
+        return '#E05252';
+      }
+
+      const wacLabel = document.createElement('div');
+      wacLabel.className = 'more-info-stat-label';
+      wacLabel.textContent = 'Portfolio Correlation (WAC)';
+
+      const wacValue = document.createElement('div');
+      wacValue.className = 'more-info-stat-value';
+      wacValue.textContent = (wac >= 0 ? '+' : '') + wac.toFixed(2);
+      wacValue.style.color = wacColor(wac);
+
+      const wacSub = document.createElement('div');
+      wacSub.className = 'more-info-stat-sub';
+      wacSub.textContent =
+        wac >= 0.6  ? 'Concentrated: holdings move closely together' :
+        wac >= 0.3  ? 'Moderate: some diversification benefit' :
+        wac >= 0    ? 'Well diversified: low shared risk' :
+                      'Strongly diversified: holdings offset each other';
+
+      wacBox.append(wacLabel, wacValue, wacSub);
+
+      // Pair extremes — scan off-diagonal for highest and lowest ρ
+      let maxRho = -Infinity, minRho = Infinity;
+      let maxPair = null, minPair = null;
+      for (let i = 0; i < validIds.length; i++) {
+        for (let j = i + 1; j < validIds.length; j++) {
+          const rho = matrix[validIds[i]][validIds[j]];
+          if (rho === null) continue;
+          if (rho > maxRho) { maxRho = rho; maxPair = [validIds[i], validIds[j]]; }
+          if (rho < minRho) { minRho = rho; minPair = [validIds[i], validIds[j]]; }
+        }
+      }
+
+      if (maxPair && minPair) {
+        const extremesHeader = document.createElement('div');
+        extremesHeader.className = 'pca-loadings-header';
+        extremesHeader.style.marginTop = '14px';
+        extremesHeader.textContent = 'Pair extremes';
+
+        function extremeRow(idA, idB, rho, icon) {
+          const row = document.createElement('div');
+          row.className = 'corr-extreme-row';
+          row.title = `${fullName(idA)} vs ${fullName(idB)}`;
+
+          const iconSpan = document.createElement('span');
+          iconSpan.className = 'corr-extreme-icon';
+          iconSpan.textContent = icon;
+
+          const namesSpan = document.createElement('span');
+          namesSpan.className = 'corr-extreme-names';
+          namesSpan.textContent = `${abbreviate(fullName(idA))} × ${abbreviate(fullName(idB))}`;
+
+          const rhoSpan = document.createElement('span');
+          rhoSpan.className = 'corr-extreme-rho';
+          rhoSpan.textContent = (rho >= 0 ? '+' : '') + rho.toFixed(2);
+          rhoSpan.style.color = corrColor(rho);
+
+          // Order: icon · ρ value (prominent) · names (secondary)
+          row.append(iconSpan, rhoSpan, namesSpan);
+          return row;
+        }
+
+        wacBox.append(
+          extremesHeader,
+          extremeRow(maxPair[0], maxPair[1], maxRho, '↑'),
+          extremeRow(minPair[0], minPair[1], minRho, '↓'),
+        );
+      }
+
+      statsGrid.appendChild(wacBox);
+    }
+
+    // ── PCA — Dominant Risk Factor ─────────────────────────────────
+    //    Power iteration to extract the first eigenvector of the
+    //    correlation matrix, then report the % of variance explained
+    //    and the top-loading holdings.
+
+    // Build dense N×N correlation array (nulls → 0 for PCA purposes)
+    const N = validIds.length;
+    const C = [];
+    for (let i = 0; i < N; i++) {
+      C[i] = [];
+      for (let j = 0; j < N; j++) {
+        C[i][j] = matrix[validIds[i]][validIds[j]] ?? 0;
+      }
+    }
+
+    // Power iteration: find the largest eigenvalue (λ1) and eigenvector (v1)
+    let vec = Array(N).fill(1 / Math.sqrt(N)); // initial guess
+    for (let iter = 0; iter < 200; iter++) {
+      // Multiply: w = C × vec
+      const w = Array(N).fill(0);
+      for (let i = 0; i < N; i++)
+        for (let j = 0; j < N; j++)
+          w[i] += C[i][j] * vec[j];
+      // Norm
+      const norm = Math.sqrt(w.reduce((s, x) => s + x * x, 0));
+      if (norm === 0) break;
+      // Normalise
+      const prev = vec.slice();
+      for (let i = 0; i < N; i++) vec[i] = w[i] / norm;
+      // Convergence check (change in direction)
+      let diff = 0;
+      for (let i = 0; i < N; i++) diff += (vec[i] - prev[i]) ** 2;
+      if (diff < 1e-12) break;
+    }
+
+    // Eigenvalue λ1 = vec · (C × vec)
+    const Cv = Array(N).fill(0);
+    for (let i = 0; i < N; i++)
+      for (let j = 0; j < N; j++)
+        Cv[i] += C[i][j] * vec[j];
+    const lambda1 = vec.reduce((s, v, i) => s + v * Cv[i], 0);
+    // Total variance = trace(C) = N (since diagonal is all 1's)
+    const varianceExplained = lambda1 / N;
+
+    if (varianceExplained > 0 && isFinite(varianceExplained)) {
+      const pcaBox = document.createElement('div');
+      pcaBox.className = 'more-info-stat more-info-stat--tip';
+      pcaBox.dataset.tip =
+        'Dominant Risk Factor: What share of your portfolio\'s total variance is explained ' +
+        'by a single common driver. A high percentage means most holdings move together ' +
+        'as one bet. Below 40% is well-spread, 40% to 70% is moderate, above 70% is concentrated.';
+
+      function pcaColor(v) {
+        if (v < 0.4)  return '#2ECC71';
+        if (v <= 0.7) return '#F5F7FA';
+        return '#E05252';
+      }
+
+      const pcaLabel = document.createElement('div');
+      pcaLabel.className = 'more-info-stat-label';
+      pcaLabel.textContent = 'Dominant Risk Factor';
+
+      const pcaValue = document.createElement('div');
+      pcaValue.className = 'more-info-stat-value';
+      pcaValue.textContent = Math.round(varianceExplained * 100) + '%';
+      pcaValue.style.color = pcaColor(varianceExplained);
+
+      const pcaSub = document.createElement('div');
+      pcaSub.className = 'more-info-stat-sub';
+      pcaSub.textContent =
+        varianceExplained >= 0.7  ? 'High concentration: one factor dominates your risk' :
+        varianceExplained >= 0.4  ? 'Moderate: a shared driver explains some risk' :
+                                    'Well spread: no single factor dominates';
+
+      pcaBox.append(pcaLabel, pcaValue, pcaSub);
+
+      // Top-loading holdings — show which assets drive this factor.
+      // Value shown: loading² × 100% = each asset's share of PC1 variance.
+      // Since vec is a unit vector, Σ(vec[i]²) = 1, so loading² is directly
+      // the fraction of the dominant factor's variance driven by that asset.
+      const loadings = validIds.map((id, i) => ({
+        id,
+        name: abbreviate(fullName(id)),
+        pct: vec[i] ** 2, // fraction of PC1 variance (sums to 1 across all assets)
+      }));
+      loadings.sort((a, b) => b.pct - a.pct);
+
+      const topN = Math.min(4, loadings.length);
+
+      const listHeader = document.createElement('div');
+      listHeader.className = 'pca-loadings-header';
+      listHeader.textContent = 'Top contributors to shared risk';
+      pcaBox.appendChild(listHeader);
+
+      const listEl = document.createElement('div');
+      listEl.className = 'pca-loadings';
+
+      for (let k = 0; k < topN; k++) {
+        const item = loadings[k];
+        const row = document.createElement('div');
+        row.className = 'pca-loading-row';
+
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'pca-loading-name';
+        nameSpan.textContent = item.name;
+        // title on the name span (row uses display:contents so its own title won't fire)
+        nameSpan.title = `${fullName(item.id)} — drives ${Math.round(item.pct * 100)}% of the dominant risk factor`;
+
+        const barOuter = document.createElement('span');
+        barOuter.className = 'pca-loading-bar-outer';
+        const barInner = document.createElement('span');
+        barInner.className = 'pca-loading-bar-inner';
+        // Bar scaled relative to the top asset
+        barInner.style.width = Math.round((item.pct / loadings[0].pct) * 100) + '%';
+        barOuter.appendChild(barInner);
+
+        const valSpan = document.createElement('span');
+        valSpan.className = 'pca-loading-val';
+        valSpan.textContent = Math.round(item.pct * 100) + '%';
+
+        row.append(nameSpan, barOuter, valSpan);
+        listEl.appendChild(row);
+      }
+
+      pcaBox.appendChild(listEl);
+      statsGrid.appendChild(pcaBox);
+    }
+
+    wrap.appendChild(statsGrid);
+  }
+
+  // 7. Shared floating tooltip
+  let tooltip = document.getElementById('corrTooltip');
+  if (!tooltip) {
+    tooltip = document.createElement('div');
+    tooltip.id = 'corrTooltip';
+    tooltip.className = 'corr-tooltip';
+    document.body.appendChild(tooltip);
+  }
+
+  // Helper: clamp tooltip so it never overflows the viewport
+  function positionTooltip(e) {
+    const pad = 14;
+    const vw = document.documentElement.clientWidth;
+    const vh = document.documentElement.clientHeight;
+    const tw = tooltip.offsetWidth  || 200;
+    const th = tooltip.offsetHeight || 60;
+    let x = e.clientX + pad;
+    let y = e.clientY + pad;
+    // If it would overflow the right edge, flip to the left of the cursor
+    if (x + tw > vw - 8) x = e.clientX - tw - pad;
+    // If it would overflow the bottom, flip above the cursor
+    if (y + th > vh - 8) y = e.clientY - th - pad;
+    tooltip.style.left = Math.max(4, x) + 'px';
+    tooltip.style.top  = Math.max(4, y) + 'px';
+  }
+
+  table.addEventListener('mouseover', e => {
+    const td = e.target.closest('td');
+    if (!td || !td.dataset.corr) { tooltip.style.display = 'none'; return; }
+    const corr = parseFloat(td.dataset.corr);
+    const interp = isNaN(corr) ? '' :
+      corr >= 0.8  ? 'highly correlated'   :
+      corr >= 0.5  ? 'moderately correlated':
+      corr >= 0.2  ? 'weakly correlated'    :
+      corr >= -0.2 ? 'uncorrelated'         :
+      corr >= -0.5 ? 'weakly inverse'       :
+      corr >= -0.8 ? 'moderately inverse'   :
+                     'highly inverse';
+    // Compact format: Name vs Name · ρ = 0.1234 · weakly correlated
+    const label = td.dataset.rowName === td.dataset.colName
+      ? `<strong>${td.dataset.rowName}</strong> (self)`
+      : `<strong>${td.dataset.rowName}</strong> vs <strong>${td.dataset.colName}</strong>`;
+    tooltip.innerHTML = `${label}<br>ρ = ${td.dataset.corr}` + (interp ? ` · ${interp}` : '');
+    tooltip.style.display = 'block';
+    positionTooltip(e);
+  });
+
+  table.addEventListener('mousemove', e => {
+    if (tooltip.style.display === 'none') return;
+    positionTooltip(e);
+  });
+
+  table.addEventListener('mouseleave', () => {
+    tooltip.style.display = 'none';
+  });
+}
+
+function wireCorrelationToggle() {
+  const btn = document.getElementById('btnCorrelation');
+  if (!btn || btn.dataset.wired) return;
+  btn.dataset.wired = '1';
+
+  // ── Title hover tooltip (always available, even before matrix is opened) ──
+  const infoIcon = document.getElementById('corrInfoIcon');
+  if (infoIcon) {
+    // Ensure the shared tooltip element exists
+    let infoTip = document.getElementById('corrTooltip');
+    if (!infoTip) {
+      infoTip = document.createElement('div');
+      infoTip.id = 'corrTooltip';
+      infoTip.className = 'corr-tooltip';
+      document.body.appendChild(infoTip);
+    }
+
+    const INFO_TEXT =
+      'How closely each pair of holdings moves together, based on daily returns.<br><br>' +
+      '<span style="color:#E05252">■</span> <strong>(0 → +1)</strong> · tend to rise and fall together<br>' +
+      '<span style="color:#2ECC71">■</span> <strong>(0 → −1)</strong> · tend to move in opposite directions<br>' +
+      '<strong>Near 0</strong> · largely independent of each other';
+
+    infoIcon.addEventListener('mouseenter', e => {
+      infoTip.innerHTML = INFO_TEXT;
+      infoTip.className = 'corr-tooltip corr-tooltip--info';
+      infoTip.style.display = 'block';
+      // Position below-right of icon, clamped to viewport
+      const rect = infoIcon.getBoundingClientRect();
+      const vw = document.documentElement.clientWidth;
+      const vh = document.documentElement.clientHeight;
+      let x = rect.left;
+      let y = rect.bottom + 6;
+      // Force a layout pass so offsetWidth is accurate
+      requestAnimationFrame(() => {
+        const tw = infoTip.offsetWidth  || 300;
+        const th = infoTip.offsetHeight || 100;
+        if (x + tw > vw - 8) x = vw - tw - 8;
+        if (y + th > vh - 8) y = rect.top - th - 6;
+        infoTip.style.left = Math.max(4, x) + 'px';
+        infoTip.style.top  = Math.max(4, y) + 'px';
+      });
+    });
+
+    infoIcon.addEventListener('mouseleave', () => {
+      infoTip.style.display = 'none';
+      infoTip.className = 'corr-tooltip'; // reset class
+    });
+  }
+
+  btn.addEventListener('click', async () => {
+    const content = document.getElementById('correlationContent');
+    const isOpen  = content.style.display !== 'none';
+    if (isOpen) {
+      content.style.display = 'none';
+      btn.textContent = '⊕ Show matrix';
+      btn.classList.remove('open');
+    } else {
+      content.style.display = 'block';
+      btn.textContent = '⊖ Hide matrix';
+      btn.classList.add('open');
+      // Render lazily — only when first opened
+      if (!document.getElementById('correlationHeatmap').dataset.rendered) {
+        document.getElementById('correlationHeatmap').dataset.rendered = '1';
+        await renderCorrelationMatrix(
+          globalData.positions,
+          globalData.vwdIds,
+          globalData.names
+        );
+      }
+    }
+  });
+}

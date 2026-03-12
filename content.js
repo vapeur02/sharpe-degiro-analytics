@@ -113,6 +113,9 @@
     const BASE = window.location.origin;
     const results = {};
 
+    // Report current page so dashboard can warn if user isn't on portfolio tab
+    results.currentUrl = window.location.href;
+
     const config = await get(`${BASE}/login/secure/config`);
     const sessionId = config?.data?.sessionId;
     if (!sessionId) throw new Error('Could not get sessionId from config');
@@ -161,9 +164,29 @@
       }
     }
 
+    // Fetch dividends from account overview (portfolio-reports/v6)
     try {
-      results.dividends = await get(`${BASE}/portfolio-reports/secure/v3/ca/${intAccount}${p}`);
-    } catch(e) {}
+      const today = new Date();
+      const toDate = `${String(today.getDate()).padStart(2,'0')}/${String(today.getMonth()+1).padStart(2,'0')}/${today.getFullYear()}`;
+      const aoData = await get(`${BASE}/portfolio-reports/secure/v6/accountoverview?fromDate=01/01/2010&toDate=${toDate}&intAccount=${intAccount}&sessionId=${sessionId}`);
+      const movements = aoData?.data?.cashMovements || [];
+      // Keep only positive dividend payments — description contains "divid" in any language
+      // (EN: "Dividend", FR: "Dividende", NL: "Dividend", DE: "Dividende")
+      // Exclude withholding-tax lines which have negative change
+      const divEntries = movements.filter(m =>
+        (m.description || '').toLowerCase().includes('divid') && parseFloat(m.change) > 0
+      );
+      console.log('[Sharpe] Dividend entries found:', divEntries.length);
+      results.dividends = {
+        data: divEntries.map(m => ({
+          product:         String(m.productId || ''),
+          amount:          parseFloat(m.change) || 0,
+          amountInBaseCurr:parseFloat(m.change) || 0,
+          currency:        m.currency || 'EUR',
+          payDate:         m.date || m.valueDate || '',
+        }))
+      };
+    } catch(e) { console.warn('[Sharpe] Dividends fetch failed:', e.message); }
 
     try {
       const today = new Date();

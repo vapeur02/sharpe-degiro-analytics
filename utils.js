@@ -214,11 +214,13 @@ function extractPositions(portfolio, meta, transactions) {
       let nativeTotal = 0, eurTotal = 0;
       for (const tx of buys) {
         const nativeVal = Math.abs(tx.quantity) * tx.price;
-        const eurVal    = Math.abs(tx.totalInBaseCurrency);
+        // Subtract fees for a cleaner FX rate
+        const fees = Math.abs(tx.totalFeesInBaseCurrency || 0) + Math.abs(tx.autoFxFeeInBaseCurrency || 0);
+        const eurVal = Math.abs(tx.totalInBaseCurrency) - fees;
         nativeTotal += nativeVal;
         eurTotal    += eurVal;
       }
-      if (nativeTotal > 0) purchaseFxMap[pid] = eurTotal / nativeTotal;
+      if (nativeTotal > 0 && eurTotal > 0) purchaseFxMap[pid] = eurTotal / nativeTotal;
     }
   }
 
@@ -284,8 +286,11 @@ function extractPositions(portfolio, meta, transactions) {
         }
       }
 
-      // todayPlBase is always {"EUR": -currentValue} — an internal DEGIRO accounting field,
-      // not a usable daily P&L. Daily P&L is computed later from VWD price history.
+      // todayPl: DEGIRO's portfolio API fields (todayPl, todayPlBase, todayPlInBaseCurrency)
+      // are unreliable — they often contain the total unrealized P&L rather than today's
+      // change. We rely on the DOM-scraped daily P&L value instead (scrapedDailyPnL).
+      // If a per-position today's P&L source becomes available in the future, it can be
+      // added here with a sanity check (value should be < 5% of position value per day).
       const todayPl = null;
 
       return {
@@ -309,17 +314,27 @@ function extractPositions(portfolio, meta, transactions) {
 }
 
 /**
- * Extract dividend history from the DEGIRO CA (corporate actions) API response.
+ * Extract dividend history from DEGIRO account overview API response.
+ * Entries come pre-filtered from content.js (positive divid* movements only).
+ * Pass an optional names map {productId -> productName} to resolve product names.
  */
-function extractDividends(d) {
+function extractDividends(d, names) {
   if (!d?.data) return [];
-  return d.data.map(x => ({
-    product:   x.product  || '',
-    amount:    parseFloat(x.amount) || 0,
-    amountEUR: parseFloat(x.amountInBaseCurr) || parseFloat(x.amount) || 0,
-    currency:  x.currency || 'EUR',
-    date:      normalizeDate(x.payDate),
-  })).filter(x => x.date).sort((a, b) => b.date.localeCompare(a.date));
+  const arr = Array.isArray(d.data) ? d.data : [];
+  return arr.map(x => {
+    const amt  = parseFloat(x.amount) || parseFloat(x.change) || 0;
+    const date = normalizeDate(x.payDate || x.date || x.valueDate || '');
+    const product = (names && x.product && names[x.product]) || x.product || '';
+    return {
+      product,
+      amount:    amt,
+      amountEUR: parseFloat(x.amountInBaseCurr) || amt,
+      currency:  x.currency || 'EUR',
+      date,
+    };
+  })
+  .filter(x => x.date && x.amount > 0)
+  .sort((a, b) => b.date.localeCompare(a.date));
 }
 
 /**
@@ -333,6 +348,8 @@ function extractTransactions(t) {
     price:              parseFloat(x.price) || 0,
     quantity:           parseFloat(x.quantity) || 0,
     totalInBaseCurrency:parseFloat(x.totalInBaseCurrency) || 0,
+    totalFeesInBaseCurrency: parseFloat(x.totalFeesInBaseCurrency) || 0,
+    autoFxFeeInBaseCurrency: parseFloat(x.autoFxFeeInBaseCurrency) || 0,
     buysell:            x.buysell || 'B',
   })).filter(x => x.date).sort((a, b) => a.date.localeCompare(b.date));
 }
@@ -358,13 +375,4 @@ function fmtPrice(v) {
 function fmtMonth(m) {
   const [y, mo] = m.split('-');
   return new Date(y, mo - 1).toLocaleString('default', { month: 'short', year: '2-digit' });
-}
-
-/**
- * Returns today's date as YYYY-MM-DD in the user's LOCAL timezone.
- * Unlike toISOString() which is UTC, this correctly handles users in
- * UTC+1/+2 (e.g. Amsterdam) who check their portfolio after midnight local time.
- */
-function getLocalDateStr(d = new Date()) {
-  return new Date(d.getTime() - (d.getTimezoneOffset() * 60000)).toISOString().slice(0, 10);
 }

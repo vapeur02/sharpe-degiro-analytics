@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Sharpe: Portfolio Analytics for DEGIRO",
-  "version": "1.4.3",
+  "version": "1.4.4",
   "description": "A secure analytics dashboard for DEGIRO. Track your time-weighted returns, asset allocations, S&P 500 benchmarking, and more!",
   "permissions": ["storage", "unlimitedStorage", "windows"],
   "host_permissions": [

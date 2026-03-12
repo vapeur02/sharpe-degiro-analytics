@@ -34,6 +34,9 @@
   </div>
 
   <main class="main" id="mainContent" style="display:none">
+    <div id="portfolioWarning" style="display:none" class="portfolio-warning">
+      ⚠ For live data, navigate to your <a href="https://trader.degiro.nl/trader/#/portfolio" target="_blank">DEGIRO Portfolio tab</a> and click Refresh.
+    </div>
     <div class="grid-top">
       <div class="card card--wide">
         <div class="card-header">
@@ -57,9 +60,9 @@
         </div>
         <div class="chart-wrap"><canvas id="performanceChart"></canvas></div>
         <div class="chart-insight-row">
-          <button class="btn-icon btn-insight-toggle" id="insightToggle" title="Toggle chart insights">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M9 18h6M10 22h4M12 2a7 7 0 0 1 7 7c0 2.5-1.3 4.7-3.2 6.1-.5.4-.8.9-.8 1.4V17H9v-.5c0-.5-.3-1-.8-1.4A7 7 0 0 1 12 2z"/>
+          <button class="btn-insight-toggle" id="insightToggle" title="Toggle chart insights">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M9 18h6M10 22h4M12 2a7 7 0 0 1 7 7c0 2.5-1.3 4.7-3.3 6L15 17H9l-.7-2C6.3 13.7 5 11.5 5 9a7 7 0 0 1 7-7z"/>
             </svg>
           </button>
           <div id="chartInsight" class="chart-insight" style="display:none"></div>
@@ -113,6 +116,17 @@
           <!-- Populated by JS -->
         </div>
         <div class="more-info-note" id="moreInfoNote"></div>
+      </div>
+    </div>
+
+    <div class="card card--full" id="correlationCard">
+      <div class="card-header">
+        <div class="card-title" id="corrInfoIcon">Correlation Matrix</div>
+        <div class="card-subtitle" id="correlationSubtitle">Pearson correlation of daily returns · all-time</div>
+        <button class="toggle-btn" id="btnCorrelation" title="Show/hide correlation matrix">⊕ Show matrix</button>
+      </div>
+      <div id="correlationContent" style="display:none">
+        <div id="correlationHeatmap" class="correlation-wrap"></div>
       </div>
     </div>
 

@@ -31,11 +31,15 @@
     <div class="no-session" id="noSession" style="display:none">
       <div class="no-session-icon">⚡</div>
       <h2>Not connected</h2>
-      <p>Open trader.degiro.nl and log in, then click refresh.</p>
-      <a href="https://trader.degiro.nl" target="_blank" class="btn-primary">Open DEGIRO &rarr;</a>
+      <p>Open DEGIRO and navigate to your Portfolio tab, then click refresh.</p>
+      <a href="https://trader.degiro.nl/trader/#/portfolio" target="_blank" class="btn-primary">Open DEGIRO Portfolio &rarr;</a>
     </div>
 
     <div class="dashboard" id="dashboard" style="display:none">
+      <!-- Warning shown when DEGIRO is open but not on portfolio tab -->
+      <div id="portfolioWarning" style="display:none" class="portfolio-warning">
+        ⚠ For live data, open your <a href="https://trader.degiro.nl/trader/#/portfolio" target="_blank">DEGIRO Portfolio tab</a> then refresh.
+      </div>
       <nav class="tabs">
         <button class="tab active" data-tab="overview">Overview</button>
         <button class="tab" data-tab="positions">Positions</button>

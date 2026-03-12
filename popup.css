@@ -294,3 +294,6 @@ body {
   line-height: 1.6;
 }
 .insight-card--tip:hover::after { display: block; }
+
+.portfolio-warning { background: #2A1F00; border-bottom: 1px solid #7A5000; color: #FFB84D; font-size: 11px; padding: 7px 12px; line-height: 1.5; }
+.portfolio-warning a { color: #FFD080; text-decoration: underline; }

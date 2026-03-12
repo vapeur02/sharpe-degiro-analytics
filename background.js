@@ -152,7 +152,7 @@ async function fetchViaContentScript() {
 
     const data = result.data;
     const toStore = { hasData: true, lastFetch: Date.now() };
-    if (data.intAccount) toStore.intAccount = String(data.intAccount);
+    if (data.currentUrl) toStore.currentUrl = data.currentUrl;
     if (data.sessionId) toStore.sessionId = data.sessionId;
     if (data.portfolio) toStore.portfolio = data.portfolio;
     if (data.dividends) toStore.dividends = data.dividends;

@@ -325,3 +325,47 @@ body.privacy-mode tr:hover .sensitive {
   transition: color 0.15s;
 }
 .footer-link:hover { color: var(--text); }
+
+.portfolio-warning { background: #2A1F00; border-bottom: 1px solid #7A5000; color: #FFB84D; font-size: 11px; padding: 8px 16px; line-height: 1.5; margin-bottom: 4px; }
+.portfolio-warning a { color: #FFD080; text-decoration: underline; }
+
+/* ── Correlation Matrix ─────────────────────────────────────────── */
+.correlation-wrap { overflow-x: auto; padding: 8px 0 16px; }
+/* Table stretches to fill the card; fixed layout so all N data columns share equal width */
+.correlation-table { border-collapse: collapse; font-size: 10px; font-family: var(--font-mono); width: 100%; table-layout: fixed; }
+/* Base header styles */
+.correlation-table th { color: var(--muted); font-weight: 500; font-size: 9px; letter-spacing: 0.04em; padding: 0; }
+/* Column header cells: -45° diagonal text — standard heatmap pattern, far more legible than vertical */
+.correlation-table th.col-header-cell { padding: 0 2px; vertical-align: bottom; overflow: visible; }
+.correlation-table .col-label-outer { position: relative; height: 110px; }
+.correlation-table .col-label-text { position: absolute; bottom: 8px; left: 50%; transform: rotate(-45deg); transform-origin: 0% 100%; white-space: nowrap; font-size: 10px; font-weight: 600; color: #9EABBE; letter-spacing: 0.02em; }
+/* Row-label column: fixed width so data columns get all the remaining space */
+.correlation-table th.row-label { text-align: right; vertical-align: middle; padding-right: 10px; width: 120px; min-width: 80px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 10px; font-weight: 600; color: #9EABBE; }
+/* Data cells expand to fill their column */
+.correlation-table td { height: 38px; text-align: center; font-size: 10px; font-weight: 600; border: 1px solid rgba(0,0,0,0.18); cursor: default; transition: opacity 0.15s; position: relative; }
+.correlation-table td:hover { opacity: 0.82; outline: 2px solid var(--text); outline-offset: -2px; z-index: 1; }
+.correlation-table td.corr-diag { opacity: 0.5; }
+.corr-tooltip { position: fixed; background: var(--bg3); border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px; font-size: 11px; font-family: var(--font-mono); color: var(--text); pointer-events: none; z-index: 1000; white-space: nowrap; box-shadow: 0 4px 16px rgba(0,0,0,0.5); display: none; line-height: 1.6; }
+/* Info tooltip for the title — wraps prose, wider than cell tooltips */
+.corr-tooltip.corr-tooltip--info { white-space: normal; max-width: 300px; }
+/* Make the card title the hover target; padding enlarges the hit area */
+#corrInfoIcon { cursor: default; padding: 4px 6px; margin: -4px -6px; border-radius: 4px; transition: color 0.15s; }
+#corrInfoIcon:hover { color: var(--text); }
+/* WAC + PCA stat boxes: stretch so both match height */
+.corr-stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 14px; align-items: stretch; }
+/* Pair extremes rows inside WAC box: icon · value · names */
+.corr-extreme-row { display: flex; align-items: baseline; gap: 6px; margin-top: 5px; font-family: var(--font-mono); }
+.corr-extreme-icon { flex: 0 0 auto; font-size: 10px; color: var(--muted); opacity: 0.7; }
+.corr-extreme-rho { flex: 0 0 auto; font-size: 14px; font-weight: 700; font-family: var(--font-display); }
+.corr-extreme-names { flex: 1 1 0; font-size: 10px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 600px) { .corr-stats-grid { grid-template-columns: 1fr; } }
+/* PCA loading bars */
+.pca-loadings-header { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; margin-top: 10px; margin-bottom: 4px; opacity: 0.7; }
+/* Grid: name col = widest name across all rows (max-content), bar fills rest, value fixed */
+.pca-loadings { display: grid; grid-template-columns: max-content 1fr 36px; column-gap: 8px; row-gap: 5px; align-items: center; }
+/* display:contents makes children direct grid items — every bar snaps to the same column */
+.pca-loading-row { display: contents; }
+.pca-loading-name { white-space: nowrap; font-size: 10px; font-family: var(--font-mono); color: var(--muted); }
+.pca-loading-bar-outer { height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
+.pca-loading-bar-inner { display: block; height: 100%; background: #8B9BB4; border-radius: 3px; }
+.pca-loading-val { text-align: right; font-size: 9px; font-family: var(--font-mono); color: var(--muted); }

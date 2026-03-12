@@ -99,6 +99,22 @@ async function loadData() {
   } else {
     renderDashboard(data);
   }
+  checkPortfolioTab();
+}
+
+// Show a warning banner if DEGIRO is open but not on the portfolio page.
+async function checkPortfolioTab() {
+  const banner = document.getElementById('portfolioWarning');
+  if (!banner) return;
+  try {
+    const stored = await chrome.storage.local.get('currentUrl');
+    const url = stored.currentUrl || '';
+    const onDegiro = url.includes('degiro');
+    const onPortfolio = url.includes('#/portfolio');
+    banner.style.display = (onDegiro && !onPortfolio) ? 'block' : 'none';
+  } catch(e) {
+    banner.style.display = 'none';
+  }
 }
 
 function renderDashboard(data) {
@@ -113,7 +129,7 @@ function renderDashboard(data) {
   renderSummary(positions, dividends, data);
   renderOpenPositions(positions);
   renderClosedPositions(transactions, meta);
-  renderInsights(positions, dividends, transactions, data.transactions);
+  renderInsights(positions, dividends, transactions);
 
   if (positions.length > 0) {
     renderAllocationChart(positions, 'holdings');
@@ -549,7 +565,7 @@ function computeClosedPositions(transactions, names) {
 
 // ── More Insights ────────────────────────────────────────────────────
 
-function renderInsights(positions, dividends, transactions, rawTransactions) {
+function renderInsights(positions, dividends, transactions) {
   const grid = document.getElementById('insightsGrid');
   if (!grid) return;
   grid.textContent = '';
@@ -584,7 +600,7 @@ function renderInsights(positions, dividends, transactions, rawTransactions) {
   grid.appendChild(makeCard(
     'Dividends received',
     (totalDividends >= 0 ? '+' : '') + fmtEur(totalDividends),
-    dividends.length > 0 ? dividends.length + ' payments (all-time)' : 'No dividend history found',
+    dividends.length > 0 ? dividends.length + ' payments · gross before tax' : 'No dividend history found',
     totalDividends > 0 ? 'positive' : ''
   ));
 
@@ -606,30 +622,10 @@ function renderInsights(positions, dividends, transactions, rawTransactions) {
   ));
 
   // Sharpe ratio placeholder — filled later once TWR series is ready
-  const sharpeCard = makeCard('Sharpe ratio (1Y)', '—', 'Annualised vs 3% risk-free rate', '',
-    'Sharpe ratio measures return per unit of risk. Above 1 is good, above 2 is great, above 3 is excellent. Below 0 means you earned less than the 3% risk-free rate. Calculated from daily portfolio returns, annualised over 252 trading days.');
+  const sharpeCard = makeCard('Sharpe ratio (all-time)', '—', 'Annualised vs 3% risk-free rate', '',
+    'Sharpe ratio measures return per unit of risk. Above 1 is good, above 2 is great, above 3 is excellent. Below 0 means you earned less than the 3% risk-free rate. Calculated from daily TWR returns (cash-flow adjusted), annualised over all available history.');
   sharpeCard.id = 'insightSharpeCard';
   grid.appendChild(sharpeCard);
-
-  // 4. Total fees paid — from raw transaction fee fields
-  const rawTx = rawTransactions?.data || [];
-  let txFees = 0, fxFees = 0;
-  for (const t of rawTx) {
-    txFees += Math.abs(parseFloat(t.totalFeesInBaseCurrency) || 0);
-    fxFees += Math.abs(parseFloat(t.autoFxFeeInBaseCurrency) || 0);
-  }
-  const totalFees = txFees + fxFees;
-  const feeBreakdownParts = [];
-  if (txFees > 0) feeBreakdownParts.push(fmtEur(txFees) + ' commissions');
-  if (fxFees > 0) feeBreakdownParts.push(fmtEur(fxFees) + ' FX fees');
-  const feeSub = feeBreakdownParts.length > 0 ? feeBreakdownParts.join(' · ') : 'All-time · across all trades';
-  grid.appendChild(makeCard(
-    'Total fees paid',
-    totalFees > 0 ? '-' + fmtEur(totalFees) : fmtEur(0),
-    feeSub,
-    totalFees > 0 ? 'negative' : '',
-    'Sum of all trading commissions and FX conversion fees across all your trades since account opening.'
-  ));
 }
 
 function renderSharpeInsight(twrSeries) {
@@ -644,16 +640,23 @@ function renderSharpeInsight(twrSeries) {
     return;
   }
 
-  const RF_DAILY = Math.pow(1.03, 1 / 252) - 1; // 3.0% p.a. compounded daily
-  const window1Y = twrSeries.slice(-252);
+  const RF_DAILY = Math.pow(1.03, 1 / 252) - 1;
+
+  // Use TWR-derived daily returns — strips out cash flow distortion from deposits/withdrawals.
+  // Filter zero-return days caused by fill-forward stale prices (same logic as dashboard).
   const dailyReturns = [];
-  for (let i = 1; i < window1Y.length; i++) {
-    const prev = window1Y[i - 1].value;
-    if (prev > 0) dailyReturns.push(window1Y[i].value / prev - 1);
+  for (let i = 1; i < twrSeries.length; i++) {
+    const prev = 1 + twrSeries[i - 1].twr / 100;
+    const curr = 1 + twrSeries[i].twr / 100;
+    if (prev > 0) {
+      const r = curr / prev - 1;
+      if (r !== 0) dailyReturns.push(r);
+    }
   }
 
   if (dailyReturns.length < 20) {
     if (valEl) valEl.textContent = 'N/A';
+    if (subEl) subEl.textContent = 'Not enough data';
     return;
   }
 
@@ -670,7 +673,7 @@ function renderSharpeInsight(twrSeries) {
     valEl.textContent = sharpe.toFixed(2);
     valEl.className = 'insight-value sensitive' + (colorClass ? ' ' + colorClass : '');
   }
-  if (subEl) subEl.textContent = 'Based on ' + Math.min(twrSeries.length, 252) + ' trading days · 3% risk-free';
+  if (subEl) subEl.textContent = n + ' trading days · 3% risk-free rate';
 }
 
 // ── Allocation Chart ─────────────────────────────────────────────────
