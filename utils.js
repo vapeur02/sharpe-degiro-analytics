@@ -94,6 +94,36 @@ function normalizeDate(raw) {
 // ── Categorisation engine ──────────────────────────────────────────
 
 /**
+ * Infer equity sector for a position from its name.
+ * Returns a sector string or null if no sector can be determined.
+ * Used by stress test to apply sector-specific shock overrides.
+ */
+function inferSector(position) {
+  const n = (position.name || '').toLowerCase();
+  // Utilities
+  if (/\butilit(y|ies)\b|\bversorgung\b|\bnutsbedrijf\b|\bservice(s)? public(s)?\b|\benergy (infra|grid|distribut)\b|\belektrizität\b|\bstroom\b|\bélectricité\b/.test(n)) return 'Utilities';
+  if (/\benel\b|\biberdrola\b|\bengie\b|\brwe\b|\bnaturgy\b|\bfortum\b|\bverbund\b|\borsted\b|\bveolia\b|\bendesa\b|\ba2a\b|\be\.on\b|\beon\b|\binnogy\b|\bvattenfall\b|\bssen\b|\bnational grid\b|\bunited utilit\b|\bsevern trent\b|\bpennon\b/.test(n)) return 'Utilities';
+  // Healthcare / Pharma
+  if (/\bhealth ?care\b|\bpharma\b|\bmedica\b|\bbiotech\b|\bgezondheidszorg\b|\bgesundheit\b|\bsanté\b|\btherapeutic\b|\boncolog\b/.test(n)) return 'Healthcare';
+  if (/\bnovo nordisk\b|\broche\b|\bnovartis\b|\bsanofi\b|\bastrazeneca\b|\bgsk\b|\bglaxo\b|\bbayer\b|\bmerck\b|\bpfizer\b|\babbvie\b|\bamgen\b|\bjohnson.*johnson\b|\beli lilly\b|\bmedtronic\b/.test(n)) return 'Healthcare';
+  // Consumer Staples
+  if (/\bconsumer staple\b|\bdagelijks\b|\bbasiskonsumgüter\b|\bconsommation de base\b|\bstaple\b/.test(n)) return 'Consumer Staples';
+  if (/\bnestlé?\b|\bunilever\b|\bprocter\b|\bdanone\b|\bhenkel\b|\bbeiersdorf\b|\bl'oréal\b|\bloreal\b|\breckitt\b|\bdiageo\b|\bab inbev\b|\bheineken\b|\bcarlsberg\b|\bcolgate\b|\bkimberly\b|\bchurch.*dwight\b/.test(n)) return 'Consumer Staples';
+  // Technology
+  if (/\btechnolog(y|ie)\b|\btech\b|\bsoftware\b|\bsemiconductor\b|\bhalbleiter\b|\bhalfgeleider\b|\bcloud\b|\bcyber\b|\bartificial intellig\b|\b[  ]ai\b|\bmachine learn\b/.test(n)) return 'Technology';
+  if (/\basml\b|\bsap\b|\bnvidia\b|\bmicrosoft\b|\bapple\b|\bgoogle\b|\balphabet\b|\bmeta\b|\bamazon\b|\btsmc\b|\bbroadcom\b|\badobe\b|\boracle\b|\bsalesforce\b|\bcrowdstrike\b|\bpalantir\b|\barm\b/.test(n)) return 'Technology';
+  // Financials
+  if (/\bfinancial\b|\bbank\b|\binsurance\b|\bverzekering\b|\bversicherung\b|\bassurance\b|\bfinanz\b/.test(n)) return 'Financials';
+  // Energy (oil & gas — distinct from commodities)
+  if (/\benergy\b|\böl\b|\boil\b|\bgas\b|\bpetrol\b|\bpétrole\b|\benergie\b/.test(n)) return 'Energy';
+  if (/\bshell\b|\btotalenergies\b|\bbp\b|\bequinor\b|\beni\b|\brepsol\b|\bgalp\b|\bomv\b/.test(n)) return 'Energy';
+  // Defence / Aerospace
+  if (/\bdefen[cs]e\b|\baerospace\b|\bmilitar\b|\brüstung\b|\bdéfense\b|\bdefensie\b/.test(n)) return 'Defence';
+  if (/\brheinmetall\b|\bthales\b|\bleonardo\b|\bbae systems\b|\bsaab\b|\bdassault\b/.test(n)) return 'Defence';
+  return null;
+}
+
+/**
  * Infer asset class for a position.
  * Priority: hardcoded map → productTypeId → multilingual name regex → 'Equity'.
  */
@@ -354,6 +384,97 @@ function extractTransactions(t) {
   })).filter(x => x.date).sort((a, b) => a.date.localeCompare(b.date));
 }
 
+// ── Closed positions (FIFO with realised FX tracking) ─────────────
+
+/**
+ * Compute closed (and partially closed) position P&L using FIFO matching.
+ * Shared by both dashboard.js and popup.js.
+ * @param {Array} transactions - extracted transaction array
+ * @param {Object} names - {productId → displayName}
+ * @param {Object} meta - {productId → {currency, ...}} from extractProductMeta
+ */
+function computeClosedPositions(transactions, names, meta) {
+  const byProduct = {};
+  transactions.forEach(tx => {
+    const id = tx.productId;
+    if (!byProduct[id]) byProduct[id] = [];
+    byProduct[id].push(tx);
+  });
+
+  const closed = [];
+
+  Object.entries(byProduct).forEach(([id, txs]) => {
+    const sorted = [...txs].sort((a, b) => a.date.localeCompare(b.date));
+    const buyQueue = [];
+    let totalSoldQty = 0;
+    let totalBuyCostEUR = 0;
+    let totalSellProcEUR = 0;
+    let netQty = 0;
+
+    // Historical currency effect (realised FX P&L on sold lots)
+    // For each matched lot: fxImpact = matchedQty × buyNativePrice × (sellFX − buyFX)
+    let realizedFxPL = 0;
+
+    // Detect if this product is non-EUR
+    const productCurrency = meta?.[id]?.currency || '';
+    let isNonEUR = productCurrency !== '' && productCurrency !== 'EUR';
+
+    sorted.forEach(tx => {
+      const qty = Math.abs(tx.quantity);
+      const eurPerShare = qty > 0 ? Math.abs(tx.totalInBaseCurrency) / qty : 0;
+      const nativePrice = tx.price;
+      const fees = Math.abs(tx.totalFeesInBaseCurrency || 0) + Math.abs(tx.autoFxFeeInBaseCurrency || 0);
+      const eurExFees = Math.abs(tx.totalInBaseCurrency) - fees;
+      const impliedFX = (nativePrice > 0 && qty > 0 && eurExFees > 0)
+        ? eurExFees / (nativePrice * qty)
+        : 1;
+
+      if (tx.buysell === 'B') {
+        netQty += qty;
+        buyQueue.push({ qty, eurPerShare, nativePrice, fx: impliedFX });
+        if (!productCurrency && Math.abs(impliedFX - 1) > 0.05) isNonEUR = true;
+      } else {
+        netQty -= qty;
+        const sellFX = impliedFX;
+        let remaining = qty;
+        while (remaining > 0.0001 && buyQueue.length > 0) {
+          const lot = buyQueue[0];
+          const matched = Math.min(lot.qty, remaining);
+          totalBuyCostEUR += matched * lot.eurPerShare;
+          totalSoldQty += matched;
+          if (isNonEUR && lot.nativePrice > 0) {
+            realizedFxPL += matched * lot.nativePrice * (sellFX - lot.fx);
+          }
+          lot.qty -= matched;
+          remaining -= matched;
+          if (lot.qty < 0.0001) buyQueue.shift();
+        }
+        totalSellProcEUR += Math.abs(tx.totalInBaseCurrency);
+      }
+    });
+
+    if (totalSoldQty > 0) {
+      const isPartial = netQty > 0.5;
+      const realizedPL = totalSellProcEUR - totalBuyCostEUR;
+      const plPct = totalBuyCostEUR > 0 ? (realizedPL / totalBuyCostEUR) * 100 : 0;
+      closed.push({
+        id,
+        name: names?.[id] || 'ID ' + id,
+        currency: productCurrency || 'EUR',
+        totalSold: totalSoldQty,
+        avgBuyPrice: totalSoldQty > 0 ? totalBuyCostEUR / totalSoldQty : 0,
+        avgSellPrice: totalSoldQty > 0 ? totalSellProcEUR / totalSoldQty : 0,
+        realizedPL,
+        plPct,
+        isPartial,
+        realizedFxPL: isNonEUR ? Math.round(realizedFxPL * 100) / 100 : 0,
+      });
+    }
+  });
+
+  return closed.sort((a, b) => Math.abs(b.realizedPL) - Math.abs(a.realizedPL));
+}
+
 // ── Formatting ─────────────────────────────────────────────────────
 
 function fmtEur(v) {
@@ -375,4 +496,29 @@ function fmtPrice(v) {
 function fmtMonth(m) {
   const [y, mo] = m.split('-');
   return new Date(y, mo - 1).toLocaleString('default', { month: 'short', year: '2-digit' });
+}
+
+/**
+ * Convert an array of row objects to a CSV string and trigger download.
+ * @param {string} filename - e.g. 'positions.csv'
+ * @param {string[]} headers - column header labels
+ * @param {Array<Array<string|number>>} rows - 2D array of cell values
+ */
+function downloadCSV(filename, headers, rows) {
+  const escape = v => {
+    const s = String(v ?? '');
+    return s.includes(',') || s.includes('"') || s.includes('\n')
+      ? '"' + s.replace(/"/g, '""') + '"'
+      : s;
+  };
+  const lines = [headers.map(escape).join(',')];
+  rows.forEach(r => lines.push(r.map(escape).join(',')));
+  const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename; a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }

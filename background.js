@@ -15,6 +15,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     evictStaleCacheEntries(0).then(() => sendResponse({ ok: true }));
     return true;
   }
+  if (message.type === 'OPEN_DASHBOARD') {
+    const dashUrl = chrome.runtime.getURL('dashboard.html');
+    // Focus existing dashboard tab if already open, otherwise create one
+    chrome.tabs.query({ url: dashUrl }).then(tabs => {
+      if (tabs.length > 0) {
+        chrome.tabs.update(tabs[0].id, { active: true });
+        chrome.windows.update(tabs[0].windowId, { focused: true });
+      } else {
+        chrome.tabs.create({ url: dashUrl });
+      }
+    });
+    return false; // no async response needed
+  }
 });
 
 // On service worker startup, evict any cache entries older than 7 days
@@ -22,19 +35,48 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 chrome.runtime.onInstalled.addListener(() => evictStaleCacheEntries(7 * 24 * 3600e3));
 self.addEventListener('activate', () => evictStaleCacheEntries(7 * 24 * 3600e3));
 
+// Financial portfolio data keys that contain sensitive user information.
+// These are cleared automatically when the data is older than PORTFOLIO_MAX_AGE_MS,
+// ensuring that stale account data does not persist indefinitely on the device.
+const PORTFOLIO_DATA_KEYS = [
+  'portfolio', 'dividends', 'transactions', 'account',
+  'intAccount', 'productInfo', 'currentUrl',
+  'scrapedDailyPnL', 'scrapedTotalPnL', 'scrapedPortfolioValue',
+];
+const PORTFOLIO_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
+
 async function evictStaleCacheEntries(maxAgeMs) {
   try {
     const all = await chrome.storage.local.get(null);
     const keysToRemove = [];
     const now = Date.now();
+
+    // ── Price history cache eviction ────────────────────────────────────
     for (const [key, val] of Object.entries(all)) {
       if (key.startsWith('priceCache_') && val?.ts && (now - val.ts) > maxAgeMs) {
         keysToRemove.push(key);
       }
     }
+
+    // ── Sensitive financial data eviction ───────────────────────────────
+    // If lastFetch exists and the portfolio data is older than 24 hours,
+    // clear it so sensitive account data doesn't persist indefinitely.
+    // The data is re-fetched fresh on the next Refresh, so nothing is lost.
+    const lastFetch = all.lastFetch || 0;
+    if (lastFetch && (now - lastFetch) > PORTFOLIO_MAX_AGE_MS) {
+      for (const key of PORTFOLIO_DATA_KEYS) {
+        if (key in all) keysToRemove.push(key);
+      }
+      // Also clear hasData so the UI prompts a fresh fetch rather than
+      // rendering a dashboard from stale/missing data.
+      if ('hasData' in all) keysToRemove.push('hasData');
+      if ('lastFetch' in all) keysToRemove.push('lastFetch');
+      console.log('[BG] Evicting stale portfolio data (age:', Math.round((now - lastFetch) / 3600e3), 'h)');
+    }
+
     if (keysToRemove.length) {
       await chrome.storage.local.remove(keysToRemove);
-      console.log('[BG] Evicted stale cache keys:', keysToRemove);
+      console.log('[BG] Evicted stale keys:', keysToRemove);
     }
   } catch(e) { console.error('[BG] Cache eviction failed:', e); }
 }
@@ -65,7 +107,7 @@ async function fetchPriceHistoryCached(vwdIds, period) {
 }
 
 async function fetchPriceHistory(vwdIds, period) {
-  const periodMap = { '1W': 'P1M', '1M': 'P1M', '6M': 'P6M', '1Y': '1Y', '2Y': '2Y', '3Y': '3Y', '5Y': '5Y' };
+  const periodMap = { '1W': '1M', '1M': '1M', '6M': '6M', '1Y': '1Y', '2Y': '2Y', '3Y': '3Y', '5Y': '5Y' };
   const vwdPeriod = periodMap[period] || period;
   const priceHistories = {};
 
@@ -131,7 +173,14 @@ function parseVwdSeries(json) {
     return priceSeries.data.map(([offset, price]) => {
       const d = new Date(startDate);
       d.setDate(d.getDate() + offset);
-      return { date: d.toISOString().slice(0,10), price };
+      // Use local date parts instead of toISOString() (which is UTC).
+      // VWD dates represent exchange trading days in CET — using UTC can shift
+      // dates back by one day for timezones ahead of UTC, causing the latest
+      // trading day to collide with the previous day and get lost.
+      const yyyy = d.getFullYear();
+      const mm   = String(d.getMonth() + 1).padStart(2, '0');
+      const dd   = String(d.getDate()).padStart(2, '0');
+      return { date: `${yyyy}-${mm}-${dd}`, price };
     }).filter(d => d.price != null);
   } catch(e) { return []; }
 }
@@ -153,12 +202,15 @@ async function fetchViaContentScript() {
     const data = result.data;
     const toStore = { hasData: true, lastFetch: Date.now() };
     if (data.currentUrl) toStore.currentUrl = data.currentUrl;
-    if (data.sessionId) toStore.sessionId = data.sessionId;
+    // NOTE: sessionId is intentionally NOT persisted — it's a sensitive auth token
+    // that expires and is only needed transiently by the content script for API calls.
     if (data.portfolio) toStore.portfolio = data.portfolio;
     if (data.dividends) toStore.dividends = data.dividends;
     if (data.transactions) toStore.transactions = data.transactions;
     if (data.account) toStore.account = data.account;
-    if (data.client) toStore.client = data.client;
+    // Store only intAccount from client — the full client object contains PII
+    // (name, email, phone, address) that doesn't need to persist in extension storage.
+    if (data.intAccount) toStore.intAccount = data.intAccount;
     if (data.productInfo) toStore.productInfo = data.productInfo;
 
     // Scraped real-time values from DEGIRO's rendered DOM

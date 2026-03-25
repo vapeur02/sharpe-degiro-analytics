@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git clone:*)",
+      "Bash(cp -r /tmp/anthropic-skills/skills/frontend-design ~/.claude/skills/)",
+      "Bash(rm -rf /tmp/anthropic-skills)",
+      "Read(//tmp/anthropic-skills/**)",
+      "Read(//c/Users/phili/AppData/Local/Temp/anthropic-skills/**)",
+      "Bash(mkdir -p C:/Users/phili/.claude/skills)",
+      "Bash(cp -r C:/Users/phili/AppData/Local/Temp/anthropic-skills/skills/frontend-design C:/Users/phili/.claude/skills/)",
+      "Bash(npm install:*)",
+      "Bash(where npm:*)",
+      "Bash(cmd.exe /c \"where npm\")",
+      "Bash(cmd.exe /c \"npm install -g uipro-cli\")",
+      "Bash(cmd.exe /c \"npm install -g uipro-cli && uipro --version\")",
+      "Read(//c/Program Files/nodejs/**)",
+      "Read(//c/Users/phili/AppData/Roaming/**)"
+    ]
+  }
+}

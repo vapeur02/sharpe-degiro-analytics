@@ -3,9 +3,9 @@
 @font-face { font-family: 'Syne'; font-style: normal; font-weight: 600; src: url('../fonts/syne-latin-600-normal.woff2') format('woff2'); }
 @font-face { font-family: 'Syne'; font-style: normal; font-weight: 700; src: url('../fonts/syne-latin-700-normal.woff2') format('woff2'); }
 @font-face { font-family: 'Syne'; font-style: normal; font-weight: 800; src: url('../fonts/syne-latin-800-normal.woff2') format('woff2'); }
-@font-face { font-family: 'DM Mono'; font-style: normal; font-weight: 300; src: url('../fonts/dm-mono-latin-300-normal.woff2') format('woff2'); }
-@font-face { font-family: 'DM Mono'; font-style: normal; font-weight: 400; src: url('../fonts/dm-mono-latin-400-normal.woff2') format('woff2'); }
-@font-face { font-family: 'DM Mono'; font-style: normal; font-weight: 500; src: url('../fonts/dm-mono-latin-500-normal.woff2') format('woff2'); }
+@font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 300; src: url('../fonts/jetbrains-mono-latin-300-normal.woff2') format('woff2'); }
+@font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 400; src: url('../fonts/jetbrains-mono-latin-400-normal.woff2') format('woff2'); }
+@font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 500; src: url('../fonts/jetbrains-mono-latin-500-normal.woff2') format('woff2'); }
 
 :root {
   --bg: #0A111A;
@@ -20,7 +20,7 @@
   --accent2: #00A8E1;
   --red: #FF4757;
   --green: #2ACA69;
-  --font-mono: 'DM Mono', monospace;
+  --font-mono: 'JetBrains Mono', monospace;
   --font-display: 'Syne', sans-serif;
 }
 
@@ -50,7 +50,7 @@ body {
 
 .logo { display: flex; align-items: center; gap: 8px; }
 .logo-img { width: 26px; height: 26px; object-fit: contain; display: block; }
-.logo-text { font-family: var(--font-display); font-weight: 800; font-size: 17px; letter-spacing: -0.02em; }
+.logo-text { font-family: var(--font-display); font-weight: 800; font-size: 20px; letter-spacing: -0.02em; }
 .logo-accent { color: var(--accent); }
 
 .header-right { display: flex; align-items: center; gap: 10px; }
@@ -211,21 +211,10 @@ body {
 
 .summary-label-sub { font-size: 9px; opacity: 0.6; text-transform: lowercase; letter-spacing: 0; }
 
-/* ── Donate button — matches .btn-refresh and .btn-icon sizing ── */
-.btn-donate {
-  display: flex; align-items: center; justify-content: center;
-  background: none;
-  border: 1px solid #00A8E155;
-  color: #00A8E1;
-  border-radius: 6px;
-  width: 28px; height: 28px;   /* same as .btn-refresh / .btn-icon */
-  font-size: 14px;
-  cursor: pointer;
-  text-decoration: none;
-  transition: all 0.2s;
-  flex-shrink: 0;
-}
-.btn-donate:hover { border-color: #00A8E1; background: #00A8E118; color: #33BAEA; }
+/* ── Pro button (popup compact variant) ── */
+.btn-pro--compact { background: linear-gradient(135deg, #FFD700 0%, #FFA500 100%); border: 1px solid transparent; color: #1a1a2e; font-family: var(--font-display); font-weight: 700; font-size: 10px; padding: 0 8px; height: 28px; border-radius: 6px; cursor: pointer; letter-spacing: 0.04em; transition: all 0.2s; flex-shrink: 0; }
+.btn-pro--compact:hover { filter: brightness(1.15); }
+.btn-pro--compact.pro-active { background: linear-gradient(135deg, #2ACA69 0%, #00A8E1 100%); color: #fff; }
 
 /* ── Clickable summary cards ── */
 .summary-card--clickable { cursor: pointer; }

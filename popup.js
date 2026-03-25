@@ -39,16 +39,36 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   });
 
-  // Ko-fi donate button
-  const btnDonate = document.getElementById('btnDonate');
-  if (btnDonate) {
-    btnDonate.addEventListener('click', (e) => {
-      e.preventDefault();
-      chrome.windows.create({
-        url: 'https://ko-fi.com/sharpe_dev/?hidefeed=true&widget=true&embed=true',
-        type: 'popup', width: 400, height: 620, focused: true
-      });
+  // Pro button — always opens the dashboard and triggers the Pro modal there.
+  // The dashboard's wireProButton() shows the correct modal based on the
+  // user's current Pro status (status modal if active, license modal if not).
+  const btnPro = document.getElementById('btnPro');
+  if (btnPro) {
+    isPro().then(active => {
+      if (active) {
+        btnPro.classList.add('pro-active');
+        btnPro.title = 'Sharpe Pro — Active. Click to view subscription details.';
+      } else {
+        btnPro.title = 'Upgrade to Sharpe PRO';
+      }
     });
+
+    if (!btnPro.dataset.wiredPro) {
+      btnPro.dataset.wiredPro = '1';
+      btnPro.addEventListener('click', () => {
+        const dashUrl = chrome.runtime.getURL('dashboard.html');
+        chrome.storage.local.set({ popupOpenMode: 'proModal' }, () => {
+          chrome.tabs.query({ url: dashUrl }, tabs => {
+            if (tabs.length > 0) {
+              chrome.tabs.update(tabs[0].id, { active: true });
+              chrome.windows.update(tabs[0].windowId, { focused: true });
+            } else {
+              chrome.tabs.create({ url: dashUrl });
+            }
+          });
+        });
+      });
+    }
   }
 
   // Period toggle for TWR chart
@@ -129,16 +149,17 @@ function renderDashboard(data) {
   renderSummary(positions, dividends, data);
   renderOpenPositions(positions);
   renderClosedPositions(transactions, meta);
-  renderInsights(positions, dividends, transactions);
+  renderInsights(positions, dividends, transactions, meta);
 
   if (positions.length > 0) {
     renderAllocationChart(positions, 'holdings');
-    renderTwrSeries(positions, data.transactions);
+    renderTwrSeries(positions, transactions);
   }
 
-  // Wire allocation toggle
+  // Wire allocation toggle (guarded to prevent duplicate listeners on re-render)
   const toggle = document.getElementById('allocToggle');
-  if (toggle) {
+  if (toggle && !toggle.dataset.wired) {
+    toggle.dataset.wired = '1';
     toggle.addEventListener('click', e => {
       const btn = e.target.closest('.toggle-btn');
       if (!btn) return;
@@ -153,7 +174,7 @@ function renderDashboard(data) {
     document.querySelector('.last-updated')?.remove();
     const lastUpdated = document.createElement('div');
     lastUpdated.className = 'last-updated';
-    lastUpdated.textContent = 'Updated ' + t + ' · ' + (data.intAccount || '');
+    lastUpdated.textContent = 'Updated ' + t;
     document.getElementById('dashboard').appendChild(lastUpdated);
   }
 }
@@ -183,11 +204,13 @@ function renderSummary(positions, dividends, data) {
 
 // ── TWR Chart ────────────────────────────────────────────────────────
 
-async function renderTwrSeries(positions, rawTransactions) {
+async function renderTwrSeries(positions, transactions) {
+  // Use date-keyed cache keys matching background.js format: priceCache_{period}_{YYYY-MM-DD}
+  const today = (() => { const d = new Date(); return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10); })();
   const cached = await new Promise(r =>
-    chrome.storage.local.get(['priceCache_5Y', 'priceCache_1Y', 'productInfo'], r)
+    chrome.storage.local.get([`priceCache_5Y_${today}`, `priceCache_1Y_${today}`, 'productInfo'], r)
   );
-  let histories = cached.priceCache_5Y?.data || cached.priceCache_1Y?.data || null;
+  let histories = cached[`priceCache_5Y_${today}`]?.data || cached[`priceCache_1Y_${today}`]?.data || null;
 
   if (!histories) {
     const vwdIds = {};
@@ -199,7 +222,7 @@ async function renderTwrSeries(positions, rawTransactions) {
     } catch(e) { return; }
   }
 
-  const transactions = extractTransactions(rawTransactions);
+  // transactions already extracted by caller — no need to re-extract
   const firstTxDate  = transactions[0]?.date || '2021-01-01';
 
   // Binary search price lookup with fill-forward
@@ -225,6 +248,18 @@ async function renderTwrSeries(positions, rawTransactions) {
   const allDates = [...dateSet].sort();
   if (allDates.length < 2) return;
 
+  // FX rate map: derive a static EUR/native rate per product from current positions.
+  // For EUR-denominated products this is ~1.0; for non-EUR (e.g. USD stocks) it converts
+  // native prices to EUR so the portfolio total is consistently EUR-denominated.
+  // Using a static rate means intra-day FX moves aren't captured, but the position
+  // weighting in the portfolio total is correct (no mixed-currency arithmetic).
+  const fxRates = {};
+  positions.forEach(p => {
+    if (p.price > 0 && p.size !== 0) {
+      fxRates[p.id] = p.value / (p.price * p.size);
+    }
+  });
+
   // Build portfolio value series
   let currentHoldings = {};
   let txIdx = 0;
@@ -244,7 +279,9 @@ async function renderTwrSeries(positions, rawTransactions) {
     let total = 0, anyPriced = false;
     Object.entries(currentHoldings).filter(([, s]) => s > 0).forEach(([id, shares]) => {
       const price = getPrice(id, date);
-      if (price) { total += price * shares; anyPriced = true; }
+      // Apply FX rate to convert native-currency price to EUR (defaults to 1.0 for EUR products
+      // or products no longer in the portfolio)
+      if (price) { total += price * shares * (fxRates[id] || 1); anyPriced = true; }
     });
     if (anyPriced && total > 0) rawSeries.push({ date, value: total, hasTx });
   });
@@ -440,7 +477,7 @@ function renderOpenPositions(positions) {
 function renderClosedPositions(transactions, meta) {
   const names = {};
   Object.entries(meta).forEach(([id, m]) => { names[id] = m.name; });
-  const closed = computeClosedPositions(transactions, names);
+  const closed = computeClosedPositions(transactions, names, meta);
 
   const c = document.getElementById('positionsListClosed');
   c.textContent = '';
@@ -508,64 +545,11 @@ function renderClosedPositions(transactions, meta) {
   });
 }
 
-// FIFO — same algorithm as dashboard.js
-function computeClosedPositions(transactions, names) {
-  const byProduct = {};
-  transactions.forEach(tx => {
-    const id = tx.productId;
-    if (!byProduct[id]) byProduct[id] = [];
-    byProduct[id].push(tx);
-  });
-
-  const closed = [];
-  Object.entries(byProduct).forEach(([id, txs]) => {
-    const sorted = [...txs].sort((a, b) => a.date.localeCompare(b.date));
-    const buyQueue = [];
-    let totalSoldQty = 0, totalBuyCostEUR = 0, totalSellProcEUR = 0, netQty = 0;
-
-    sorted.forEach(tx => {
-      const qty = Math.abs(tx.quantity);
-      const eurPerShare = qty > 0 ? Math.abs(tx.totalInBaseCurrency) / qty : 0;
-      if (tx.buysell === 'B') {
-        netQty += qty;
-        buyQueue.push({ qty, eurPerShare });
-      } else {
-        netQty -= qty;
-        let remaining = qty;
-        while (remaining > 0.0001 && buyQueue.length > 0) {
-          const lot = buyQueue[0];
-          const matched = Math.min(lot.qty, remaining);
-          totalBuyCostEUR += matched * lot.eurPerShare;
-          totalSoldQty    += matched;
-          lot.qty -= matched;
-          remaining -= matched;
-          if (lot.qty < 0.0001) buyQueue.shift();
-        }
-        totalSellProcEUR += Math.abs(tx.totalInBaseCurrency);
-      }
-    });
-
-    // Include both fully closed (netQty ≈ 0) AND partially closed (has sells but still holds some)
-    if (totalSoldQty > 0) {
-      const isPartial = netQty > 0.5;
-      const realizedPL = totalSellProcEUR - totalBuyCostEUR;
-      const plPct = totalBuyCostEUR > 0 ? (realizedPL / totalBuyCostEUR) * 100 : 0;
-      closed.push({
-        id, name: names?.[id] || 'ID ' + id,
-        totalSold: totalSoldQty,
-        avgBuyPrice:  totalSoldQty > 0 ? totalBuyCostEUR  / totalSoldQty : 0,
-        avgSellPrice: totalSoldQty > 0 ? totalSellProcEUR / totalSoldQty : 0,
-        realizedPL, plPct, isPartial
-      });
-    }
-  });
-
-  return closed.sort((a, b) => Math.abs(b.realizedPL) - Math.abs(a.realizedPL));
-}
+// computeClosedPositions is now in utils.js (shared with dashboard.js)
 
 // ── More Insights ────────────────────────────────────────────────────
 
-function renderInsights(positions, dividends, transactions) {
+function renderInsights(positions, dividends, transactions, meta) {
   const grid = document.getElementById('insightsGrid');
   if (!grid) return;
   grid.textContent = '';
@@ -573,16 +557,24 @@ function renderInsights(positions, dividends, transactions) {
   // 1. Dividends
   const totalDividends = dividends.reduce((s, d) => s + (d.amountEUR || 0), 0);
 
-  // 2. FX P&L
-  let totalFxPL = 0, fxPositions = 0;
+  // 2. FX P&L — unrealized (open positions) + realized (sold lots)
+  let unrealizedFxPL = 0, fxPositions = 0;
   positions.forEach(p => {
     if (p.currency === 'EUR') return;
-    totalFxPL += p.plFx || 0;
+    unrealizedFxPL += p.plFx || 0;
     fxPositions++;
   });
+  // Realized FX from closed/partially closed positions
+  const names = Object.fromEntries(Object.entries(meta).map(([id, m]) => [id, m.name]));
+  const closedForFx = computeClosedPositions(transactions, names, meta);
+  let realizedFxPL = 0, closedFxCount = 0;
+  closedForFx.forEach(cp => {
+    if (cp.realizedFxPL) { realizedFxPL += cp.realizedFxPL; closedFxCount++; }
+  });
+  const totalFxPL = unrealizedFxPL + realizedFxPL;
 
-  // 3. Realized gains
-  const totalRealized = positions.reduce((s, p) => s + (p.plBase - (p.plUnrealized ?? p.plBase)), 0);
+  // 3. Realized gains — use computeClosedPositions (canonical FIFO) for consistency with dashboard
+  const totalRealized = closedForFx.reduce((s, cp) => s + cp.realizedPL, 0);
 
   const makeCard = (label, value, sub, colorClass, tooltip) => {
     const card = document.createElement('div');
@@ -607,11 +599,11 @@ function renderInsights(positions, dividends, transactions) {
   grid.appendChild(makeCard(
     'Currency effect',
     (totalFxPL >= 0 ? '+' : '') + fmtEur(totalFxPL),
-    fxPositions > 0
-      ? 'Across ' + fxPositions + ' non-EUR position' + (fxPositions > 1 ? 's' : '') + ' · unrealized'
+    (fxPositions > 0 || closedFxCount > 0)
+      ? 'Open + closed positions · all-time'
       : 'No non-EUR positions',
     totalFxPL >= 0 ? 'positive' : 'negative',
-    'Impact of exchange rate movements separate from product performance.'
+    'Impact of exchange rate movements separate from product performance. Includes both open and closed positions.'
   ));
 
   grid.appendChild(makeCard(

@@ -119,13 +119,16 @@
     const config = await get(`${BASE}/login/secure/config`);
     const sessionId = config?.data?.sessionId;
     if (!sessionId) throw new Error('Could not get sessionId from config');
-    results.sessionId = sessionId;
+    // sessionId is intentionally NOT added to results — it is a sensitive auth
+    // token used only locally to build API URLs below. It must never travel
+    // through the extension message bus or be stored anywhere.
 
     const client = await get(`${BASE}/pa/secure/client?sessionId=${sessionId}`);
     const intAccount = client?.data?.intAccount;
     if (!intAccount) throw new Error('Could not get intAccount');
     results.intAccount = intAccount;
-    results.client = client;
+    // client is intentionally NOT added to results — the full object contains PII
+    // (name, email, phone, address). Only intAccount (a plain integer) is forwarded.
 
     const p = `?intAccount=${intAccount}&sessionId=${sessionId}`;
 

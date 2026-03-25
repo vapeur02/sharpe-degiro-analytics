@@ -1,9 +1,11 @@
 {
+"update_url": "https://clients2.google.com/service/update2/crx",
+
   "manifest_version": 3,
   "name": "Sharpe: Portfolio Analytics for DEGIRO",
-  "version": "1.4.4",
-  "description": "A secure analytics dashboard for DEGIRO. Track your time-weighted returns, asset allocations, S&P 500 benchmarking, and more!",
-  "permissions": ["storage", "unlimitedStorage", "windows"],
+  "version": "1.5",
+  "description": "Upgrade DEGIRO with a secure, local dashboard offering advanced return tracking, risk grading, and deep insights.",
+  "permissions": ["storage", "unlimitedStorage", "windows", "tabs"],
   "host_permissions": [
     "https://trader.degiro.nl/*",
     "https://trader.degiro.ch/*",
@@ -25,10 +27,11 @@
     "https://trader.degiro.no/*",
     "https://trader.degiro.pt/*",
     "https://trader.degiro.gr/*",
-    "https://charting.vwdservices.com/*"
+    "https://charting.vwdservices.com/*",
+    "https://api.lemonsqueezy.com/*"
   ],
   "content_security_policy": {
-    "extension_pages": "script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self' https://charting.vwdservices.com https://*.degiro.nl https://*.degiro.ch https://*.degiro.co.uk https://*.degiro.ie https://*.degiro.fr https://*.degiro.de https://*.degiro.it https://*.degiro.es https://*.degiro.pl https://*.degiro.cz https://*.degiro.ro https://*.degiro.sk https://*.degiro.hu https://*.degiro.at https://*.degiro.se https://*.degiro.dk https://*.degiro.fi https://*.degiro.no https://*.degiro.pt https://*.degiro.gr; default-src 'self'"
+    "extension_pages": "script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self' https://charting.vwdservices.com https://api.lemonsqueezy.com https://*.degiro.nl https://*.degiro.ch https://*.degiro.co.uk https://*.degiro.ie https://*.degiro.fr https://*.degiro.de https://*.degiro.it https://*.degiro.es https://*.degiro.pl https://*.degiro.cz https://*.degiro.ro https://*.degiro.sk https://*.degiro.hu https://*.degiro.at https://*.degiro.se https://*.degiro.dk https://*.degiro.fi https://*.degiro.no https://*.degiro.pt https://*.degiro.gr; default-src 'self'"
   },
   "action": {
     "default_popup": "popup.html",
@@ -62,13 +65,13 @@
       "https://trader.degiro.pt/*",
       "https://trader.degiro.gr/*"
     ],
-    "js": ["content.js"],
+    "js": ["content.js", "banner.js"],
     "run_at": "document_idle"
   }],
   "background": { "service_worker": "background.js" },
   "web_accessible_resources": [
     {
-      "resources": ["icons/icon16.png", "icons/icon32.png", "icons/icon48.png", "icons/icon128.png"],
+      "resources": ["icons/icon16.png", "icons/icon32.png", "icons/icon48.png", "icons/icon128.png", "fonts/syne-latin-800-normal.woff2", "fonts/dm-mono-latin-400-normal.woff2"],
       "matches": ["<all_urls>"]
     }
   ],

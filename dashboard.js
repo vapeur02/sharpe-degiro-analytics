@@ -2,8 +2,25 @@
 // Shared constants (COLORS, CASH_IDS, etc.) and utilities are in utils.js,
 // loaded before this file via dashboard.html.
 
+/**
+ * Escape a string for safe insertion into innerHTML.
+ * Must be applied to any value that originates from an external API
+ * (e.g. DEGIRO product names) before interpolation into an HTML template.
+ * Pure computed values (numbers, hardcoded labels, normalised date strings)
+ * do not need this — only untrusted API-derived strings do.
+ */
+function sanitize(str) {
+  return String(str ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 let charts = {};
 let globalData = {};
+let proUnlocked = false; // set in renderAll after checking license
 
 document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('btnRefresh').addEventListener('click', async () => {
@@ -22,20 +39,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     btnPrivacy.classList.toggle('active', isHidden);
   });
 
-  // Ko-fi donate button
-  const btnDonate = document.getElementById('btnDonate');
-  if (btnDonate) {
-    btnDonate.addEventListener('click', (e) => {
-      e.preventDefault();
-      chrome.windows.create({
-        url: 'https://ko-fi.com/sharpe_dev/?hidefeed=true&widget=true&embed=true',
-        type: 'popup',
-        width: 400,
-        height: 620,
-        focused: true
-      });
-    });
-  }
   document.getElementById('periodSelect').addEventListener('change', async () => {
     if (globalData.positions) {
       await renderPerformanceChart(globalData);
@@ -77,10 +80,34 @@ async function init() {
   }
   await renderAll(data);
 
+  // Always auto-refresh in the background to ensure figures are up to date.
+  // This runs after the initial render so the user sees cached data instantly
+  // while fresh data is fetched and re-rendered silently.
+  try {
+    const result = await chrome.runtime.sendMessage({ type: 'FETCH_ALL' });
+    if (result?.ok) {
+      const freshData = await new Promise(r => chrome.storage.local.get(null, r));
+      await renderAll(freshData);
+    }
+  } catch(e) { console.warn('[Sharpe] Auto-refresh failed:', e); }
+
   // If opened from popup via a clickable stat card, switch to the requested chart mode
   chrome.storage.local.get('popupOpenMode', ({ popupOpenMode }) => {
     if (!popupOpenMode) return;
     chrome.storage.local.remove('popupOpenMode');
+    if (popupOpenMode === 'proModal') {
+      // Delegate entirely to the dashboard's own PRO button, which already knows
+      // whether to show the license modal (non-Pro) or the status modal (Pro).
+      const btn = document.getElementById('btnPro');
+      if (btn) btn.click();
+      return;
+    }
+    if (popupOpenMode === 'proStatus') {
+      // Legacy signal kept for safety — direct to proModal behaviour
+      const btn = document.getElementById('btnPro');
+      if (btn) btn.click();
+      return;
+    }
     const toggleBtns = document.querySelectorAll('#perfToggle .toggle-btn');
     toggleBtns.forEach(b => b.classList.toggle('active', b.dataset.mode === popupOpenMode));
     if (globalData.portfolioSeries) {
@@ -94,9 +121,65 @@ function showLoading() {
   document.getElementById('mainContent').style.display = 'none';
 }
 
+// ── Tab bar switching ──────────────────────────────────────────────────────
+
+function wireTabBar() {
+  const bar = document.getElementById('tabBar');
+  if (!bar || bar.dataset.wired) return;
+  bar.dataset.wired = '1';
+
+  bar.addEventListener('click', (e) => {
+    const btn = e.target.closest('.tab-btn');
+    if (!btn) return;
+    const target = btn.dataset.tab;
+
+    // Update active tab button
+    bar.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+
+    // Show matching pane, hide others
+    document.querySelectorAll('.tab-pane').forEach(pane => {
+      pane.classList.toggle('active', pane.id === 'tab' + target.charAt(0).toUpperCase() + target.slice(1));
+    });
+
+    // Lazy-render Insights tab features on first visit
+    if (target === 'insights' && !bar.dataset.insightsRendered) {
+      bar.dataset.insightsRendered = '1';
+      renderInsightsTab();
+    }
+  });
+}
+
+/** Render PRO-gated insight features when the Insights tab is first opened */
+async function renderInsightsTab() {
+  wireGradeCard();
+  await wireCorrelationToggle();
+  wireStressTestCard();
+}
+
+// ── Insight collapsible cards ──────────────────────────────────────────────
+
+function wireInsightCollapsibles() {
+  document.querySelectorAll('.insight-collapsible').forEach(card => {
+    const btn = card.querySelector('.insight-collapse-btn');
+    if (!btn || btn.dataset.wired) return;
+    btn.dataset.wired = '1';
+
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const isCollapsed = card.classList.toggle('collapsed');
+      btn.textContent = isCollapsed ? '⊕ Expand' : '⊖ Collapse';
+    });
+  });
+}
+
 function showMain() {
   document.getElementById('loadingScreen').style.display = 'none';
-  document.getElementById('mainContent').style.display = 'block';
+  document.getElementById('mainContent').style.display = 'flex';
+  const tabBar = document.getElementById('tabBar');
+  if (tabBar) tabBar.style.display = 'flex';
+  wireTabBar();
+  wireInsightCollapsibles();
   checkPortfolioTab();
 }
 
@@ -160,6 +243,10 @@ async function renderAll(data) {
 
   globalData = { positions, dividends, transactions, vwdIds, data, _cashValue: cashValue, _todayPL: todayPL, _scrapedTotalPnL: scrapedTotalPnL, _scrapedPortfolioValue: scrapedPortfolioValue, names };
 
+  // ── Pro status check ──
+  proUnlocked = await isPro();
+  wireProButton();
+
   setStatus('connected');
 
   // Zero state: new account with no positions yet
@@ -188,20 +275,17 @@ async function renderAll(data) {
   renderClosedPositionsTable(computeClosedPositions(transactions, globalData.names, meta));
   wirePositionsTabs();
   renderMoreInfo(positions, dividends, transactions);
-  wireCorrelationToggle();
 
-  // Wire up More Info toggle
-  const btnMoreInfo = document.getElementById('btnMoreInfo');
-  if (btnMoreInfo && !btnMoreInfo.dataset.wired) {
-    btnMoreInfo.dataset.wired = '1';
-    btnMoreInfo.addEventListener('click', () => {
-      const content = document.getElementById('moreInfoContent');
-      const isOpen = content.style.display !== 'none';
-      content.style.display = isOpen ? 'none' : 'block';
-      btnMoreInfo.textContent = isOpen ? '⊕ Show details' : '⊖ Hide details';
-      btnMoreInfo.classList.toggle('open', !isOpen);
-    });
-  }
+  // Always auto-show stock chart section — Pro users get real data,
+  // free users see the blurred placeholder with upgrade overlay
+  const biggestPosition = [...positions].sort((a, b) => b.value - a.value)[0];
+  if (biggestPosition) showStockChart(biggestPosition, false, { scroll: false });
+
+  // Export buttons — always shown; non-Pro clicks trigger upgrade flow
+  wireExportButtons();
+
+  // Grade, Correlation, Stress Test are now lazy-rendered
+  // when the Insights tab is first opened (see renderInsightsTab)
 
   // Wire up movers toggle — controls both Big Movers and Recent Performance
   const moversToggle = document.getElementById('moversToggle');
@@ -219,6 +303,8 @@ async function renderAll(data) {
   }
   // Fetch perf chart first (5Y), then fetch movers separately (1M)
   await renderPerformanceChart(globalData);
+  // Re-render positions table now that priceHistories5Y is available (for volatility column)
+  renderPositionsTable(positions);
   // After perf chart done, fetch movers data and compute daily P&L
   fetchHistoriesForPeriod(vwdIds, '1M').then(histories => {
     if (histories && Object.keys(histories).length > 0) {
@@ -383,7 +469,7 @@ function updateHeaderReturn() {
     const elFresh = document.getElementById('statReturnValue');
 
     if (periodLabel === 'ALL' && globalData.firstTxDate) {
-      const startDate = new Date(globalData.firstTxDate);
+      const startDate = new Date(globalData.firstTxDate + 'T12:00:00');
       const years = (Date.now() - startDate) / (365.25 * 24 * 3600 * 1000);
       if (years > 0.1) {
         const annualised = (Math.pow(1 + periodReturn / 100, 1 / years) - 1) * 100;
@@ -443,13 +529,31 @@ async function renderPerformanceChart({ positions, transactions, vwdIds }) {
   // Always fetch 5Y for TWR — we need full history back to first transaction (2021)
   // The display period only controls what date range to show, not what to calculate
   const allHistories = await chrome.runtime.sendMessage({ type: 'FETCH_PRICE_HISTORY', vwdIds, period: '5Y' });
-  
+
+  // VWD's long-period (5Y) data often lags by 1–2 trading days compared to shorter
+  // periods. Fetch 1M as well and merge any newer data points into the 5Y histories
+  // so the latest trading days are not missing from charts.
+  const shortHistories = await chrome.runtime.sendMessage({ type: 'FETCH_PRICE_HISTORY', vwdIds, period: '1M' });
+  Object.entries(shortHistories).forEach(([id, shortData]) => {
+    if (!shortData?.length) return;
+    const longData = allHistories[id];
+    if (!longData?.length) { allHistories[id] = shortData; return; }
+    const lastLongDate = longData[longData.length - 1].date;
+    const newer = shortData.filter(d => d.date > lastLongDate);
+    if (newer.length) {
+      longData.push(...newer);
+      console.log(`[Perf] Merged ${newer.length} newer points for ${id} (up to ${newer[newer.length-1].date})`);
+    }
+  });
+
   const spyData = (allHistories['__SP500__'] || []).filter(d => d.date >= firstTxDate);
   console.log('[Perf] SPY sample:', spyData[0]);
   const priceHistories = {};
   Object.entries(allHistories).forEach(([id, data]) => {
     if (id !== '__SP500__') priceHistories[id] = data;
   });
+  // Store full 5Y histories so movers can slice them by period without re-fetching
+  globalData.priceHistories5Y = priceHistories;
   
   console.log('[Perf] SPY points:', spyData.length, 'from', spyData[0]?.date);
 
@@ -474,6 +578,17 @@ async function renderPerformanceChart({ positions, transactions, vwdIds }) {
     return res;
   };
 
+  // FX rate map: derive a static EUR/native rate per product from current positions.
+  // VWD prices are in each instrument's native currency. For mixed-currency portfolios,
+  // we convert to EUR so the portfolio total isn't a meaningless sum of different currencies.
+  // A static (current) FX rate is used because we don't have historical FX data.
+  const fxRates = {};
+  positions.forEach(p => {
+    if (p.price > 0 && p.size !== 0) {
+      fxRates[p.id] = p.value / (p.price * p.size);
+    }
+  });
+
   // Get portfolio value on a given date using historical holdings
   // Per-position last known price cache for fill-forward
   const lastKnownPrice = {};
@@ -483,14 +598,15 @@ async function renderPerformanceChart({ positions, transactions, vwdIds }) {
     if (!entries.length) return null;
     let anyPriced = false;
     for (const [id, shares] of entries) {
+      const fx = fxRates[id] || 1; // EUR products ≈ 1.0, non-EUR converted
       const price = getPrice(id, date);
       if (price) {
         lastKnownPrice[id] = price; // update fill-forward cache
-        total += price * shares;
+        total += price * shares * fx;
         anyPriced = true;
       } else if (lastKnownPrice[id]) {
         // Fill forward: use last known price rather than dropping the date
-        total += lastKnownPrice[id] * shares;
+        total += lastKnownPrice[id] * shares * fx;
         anyPriced = true;
       }
       // If truly no price ever seen for this id, skip it (new position not yet priced)
@@ -559,7 +675,11 @@ async function renderPerformanceChart({ positions, transactions, vwdIds }) {
   });
 
   const twrByDate = {};
-  if (fullPortfolioSeries.length === 0) return;
+  if (fullPortfolioSeries.length === 0) {
+    document.getElementById('perfSubtitle').textContent = 'Historical price data unavailable';
+    showMain();
+    return;
+  }
 
   let cumFactor = 1;
   let spStart = fullPortfolioSeries[0].value;
@@ -588,6 +708,33 @@ async function renderPerformanceChart({ positions, transactions, vwdIds }) {
     ...d,
     twr: twrByDate[d.date] ?? 0
   }));
+
+  // Compute all-time Sharpe here from the full (unfiltered) series and store it on
+  // globalData ONCE. drawPerformanceChart must never overwrite this — it only has access
+  // to the period-sliced window, which would produce a period-specific Sharpe.
+  (() => {
+    try {
+      const RF_DAILY = Math.pow(1.03, 1 / 252) - 1;
+      const allTimeReturns = [];
+      for (let i = 1; i < fullWithTwr.length; i++) {
+        const prev = 1 + fullWithTwr[i - 1].twr / 100;
+        const curr = 1 + fullWithTwr[i].twr / 100;
+        if (prev > 0) {
+          const r = curr / prev - 1;
+          if (r !== 0) allTimeReturns.push(r);
+        }
+      }
+      if (allTimeReturns.length >= 20) {
+        const n = allTimeReturns.length;
+        const mean = allTimeReturns.reduce((s, r) => s + r, 0) / n;
+        const variance = allTimeReturns.reduce((s, r) => s + (r - mean) ** 2, 0) / (n - 1);
+        const std = Math.sqrt(variance);
+        if (std > 0) {
+          globalData.insightSharpe = ((mean - RF_DAILY) / std) * Math.sqrt(252);
+        }
+      }
+    } catch(e) { /* leave unchanged */ }
+  })();
 
   const filteredFull = fullWithTwr.filter(d => d.date >= chartStart);
   console.log(`[Perf] filteredFull: ${filteredFull.length} points, first=${filteredFull[0]?.date} last=${filteredFull[filteredFull.length-1]?.date}`);
@@ -726,7 +873,7 @@ function drawPerformanceChart(twrSeries, spyData, mode, eurSeries) {
     let annualisedStr = '—';
     let annualisedPct = null;
     if (firstDate && lastDate && firstDate !== lastDate) {
-      const days = (new Date(lastDate) - new Date(firstDate)) / (1000 * 60 * 60 * 24);
+      const days = (new Date(lastDate + 'T12:00:00') - new Date(firstDate + 'T12:00:00')) / (1000 * 60 * 60 * 24);
       const years = days / 365.25;
       if (years >= 0.08) {
         const annualised = (Math.pow(1 + periodReturnDecimal, 1 / years) - 1) * 100;
@@ -774,7 +921,7 @@ function drawPerformanceChart(twrSeries, spyData, mode, eurSeries) {
         betaVal = cov / varS;
         betaStr = betaVal.toFixed(2);
         if (annualisedPct !== null) {
-          const days = (new Date(lastDate) - new Date(firstDate)) / (1000 * 60 * 60 * 24);
+          const days = (new Date(lastDate + 'T12:00:00') - new Date(firstDate + 'T12:00:00')) / (1000 * 60 * 60 * 24);
           const years = days / 365.25;
           const spyStart = spyPriceMap[twrSeries[0]?.date] || spySource.find(d => d.date >= firstDate)?.price;
           const lastTwrDate = twrSeries[twrSeries.length - 1]?.date;
@@ -816,6 +963,10 @@ function drawPerformanceChart(twrSeries, spyData, mode, eurSeries) {
           const sharpe = ((mean - RF_DAILY) / std) * Math.sqrt(252);
           sharpeStr = sharpe.toFixed(2);
           sharpeClass = sharpe >= 1 ? 'positive' : sharpe < 0 ? 'negative' : '';
+          // NOTE: intentionally NOT writing to globalData.insightSharpe here.
+          // The all-time Sharpe is computed once in renderPerformanceChart from the
+          // full unfiltered series. Overwriting it here would corrupt the grade engine
+          // with a period-specific value whenever the user changes the chart window.
         }
       }
     } catch(e) { /* leave as — */ }
@@ -1107,8 +1258,39 @@ function drawPerformanceChart(twrSeries, spyData, mode, eurSeries) {
   globalData.perfChart = charts.performance;
 }
 
-async function fetchHistoriesForPeriod(vwdIds, period) {
-  return await chrome.runtime.sendMessage({ type: 'FETCH_PRICE_HISTORY', vwdIds, period });
+function fetchHistoriesForPeriod(vwdIds, period) {
+  // Reuse the 5Y price history already fetched by renderPerformanceChart.
+  // Slicing client-side avoids extra VWD fetches which use inconsistent period
+  // format strings (P6M, 1Y) and can fail silently or return wrong ranges.
+  const full = globalData.priceHistories5Y || {};
+  if (!Object.keys(full).length) {
+    // 5Y data not ready yet — fall back to a real fetch
+    return chrome.runtime.sendMessage({ type: 'FETCH_PRICE_HISTORY', vwdIds, period });
+  }
+
+  const periodDays = { '1W': 7, '1M': 31, '6M': 183, '1Y': 366, '2Y': 731, '3Y': 1096, '5Y': 1826 };
+  const days = periodDays[period];
+
+  if (!days) return Promise.resolve(full); // unknown period — return everything
+
+  // Find the last date across all histories (latest market close)
+  let lastDate = '';
+  Object.values(full).forEach(h => {
+    if (h.length) {
+      const d = h[h.length - 1].date;
+      if (d > lastDate) lastDate = d;
+    }
+  });
+  const cutoff = lastDate
+    ? new Date(new Date(lastDate + 'T12:00:00').getTime() - days * 864e5).toISOString().slice(0, 10)
+    : '';
+
+  const sliced = {};
+  Object.entries(full).forEach(([id, h]) => {
+    const s = cutoff ? h.filter(d => d.date >= cutoff) : h;
+    if (s.length) sliced[id] = s;
+  });
+  return Promise.resolve(sliced);
 }
 
 function jumpPerfChartToDate(targetDate) {
@@ -1120,7 +1302,7 @@ function jumpPerfChartToDate(targetDate) {
   // Find closest date index
   let closestIdx = 0, minDiff = Infinity;
   dates.forEach((d, i) => {
-    const diff = Math.abs(new Date(d) - new Date(targetDate));
+    const diff = Math.abs(new Date(d + 'T12:00:00') - new Date(targetDate + 'T12:00:00'));
     if (diff < minDiff) { minDiff = diff; closestIdx = i; }
   });
 
@@ -1159,7 +1341,7 @@ function renderMovers(positions, histories, period) {
 
   const cutoffMap = { '1W': 7, '1M': 31, '3M': 92, '6M': 183, '1Y': 366 };
   const days = cutoffMap[period] || 31;
-  const cutoff = new Date(refDate - days * 864e5).toISOString().slice(0, 10);
+  const cutoff = new Date(refDate.getTime() - days * 864e5).toISOString().slice(0, 10);
 
   const all = positions
     .filter(p => p.value > 0 && histories[p.id]?.length >= 2)
@@ -1174,32 +1356,26 @@ function renderMovers(positions, histories, period) {
     .filter(p => p && isFinite(p.pct))
     .sort((a, b) => b.pct - a.pct);
 
-  // Show up to 6 movers: best 3 and worst 3.
-  // If one side is entirely empty (e.g. all positions are down in a bear period),
-  // show up to 6 from the dominant direction instead of leaving slots empty.
+  // Always show 3 left + 3 right. Left prioritises gainers, right prioritises losers.
+  // When one side has fewer than 3, the overflow spills into the other column.
   const sorted = [...all];                         // already sorted desc by pct
   const gainers = sorted.filter(p => p.pct >= 0);
-  const losers  = sorted.filter(p => p.pct <  0).reverse(); // worst first (most negative first)
+  const losers  = sorted.filter(p => p.pct <  0).reverse(); // worst first
 
-  let topGainers, topLosers;
-  if (gainers.length === 0) {
-    // All red: show 6 worst losers
-    topGainers = [];
-    topLosers  = losers.slice(0, 6);
-  } else if (losers.length === 0) {
-    // All green: show 6 best gainers
-    topGainers = gainers.slice(0, 6);
-    topLosers  = [];
+  let leftCol, rightCol;
+  if (gainers.length >= 3 && losers.length >= 3) {
+    leftCol  = gainers.slice(0, 3);
+    rightCol = losers.slice(0, 3);
+  } else if (gainers.length < 3) {
+    // Not enough gainers: fill left with all gainers + least-negative losers
+    leftCol  = [...gainers, ...losers.slice(-(3 - gainers.length)).reverse()].slice(0, 3);
+    rightCol = losers.slice(0, 3);
   } else {
-    // Mixed: target 3 each, borrow slots from the smaller side
-    const targetG = Math.min(3, gainers.length);
-    const targetL = Math.min(3, losers.length);
-    const extraG  = Math.min(gainers.length - targetG, 3 - targetL);
-    const extraL  = Math.min(losers.length  - targetL, 3 - targetG);
-    topGainers = gainers.slice(0, targetG + Math.max(0, extraG));
-    topLosers  = losers.slice(0,  targetL + Math.max(0, extraL));
+    // Not enough losers: fill right with all losers + smallest gainers
+    leftCol  = gainers.slice(0, 3);
+    rightCol = [...losers, ...gainers.slice(-(3 - losers.length))].slice(0, 3);
   }
-  const movers = [...topGainers, ...topLosers];
+  const movers = [...leftCol, ...rightCol];
 
   if (!movers.length) {
     el.textContent = '';
@@ -1211,135 +1387,220 @@ function renderMovers(positions, histories, period) {
   }
 
   el.textContent = '';
-  movers.forEach(p => {
+
+  // Two-column layout: left column, right column
+  const cols = document.createElement('div'); cols.className = 'movers-columns';
+  const colLeftEl  = document.createElement('div'); colLeftEl.className  = 'movers-col-half';
+  const colRightEl = document.createElement('div'); colRightEl.className = 'movers-col-half';
+
+  const renderItem = (p) => {
     const up = p.pct >= 0;
     const item = document.createElement('div'); item.className = 'mover-item';
+    item.style.cursor = 'pointer';
+
+    const icon = document.createElement('div');
+    icon.className = 'mover-icon ' + (up ? 'up' : 'down');
+    icon.innerHTML = up ? '&#x25B2;&#x25B2;' : '&#x25BC;&#x25BC;';
+
+    const info = document.createElement('div'); info.className = 'mover-info';
     const nameEl = document.createElement('div'); nameEl.className = 'mover-name'; nameEl.textContent = p.name || 'ID ' + p.id;
-    const prices = document.createElement('div'); prices.className = 'mover-prices'; prices.textContent = fmtPrice(p.priceStart) + ' → ' + fmtPrice(p.priceNow);
+    const ticker = document.createElement('div'); ticker.className = 'mover-ticker'; ticker.textContent = (p.symbol || p.ticker || '').toUpperCase();
+    info.append(nameEl, ticker);
+
+    const right = document.createElement('div'); right.className = 'mover-right';
     const pctEl = document.createElement('div'); pctEl.className = 'mover-pct'; pctEl.style.color = up ? '#2ACA69' : '#FF4757';
-    pctEl.textContent = (up ? '▲' : '▼') + ' ' + Math.abs(p.pct).toFixed(1) + '%';
-    item.append(nameEl, prices, pctEl);
-    el.appendChild(item);
-  });
+    pctEl.textContent = (up ? '+' : '') + p.pct.toFixed(2) + '%';
+    right.append(pctEl);
+
+    item.append(icon, info, right);
+
+    // Click → scroll to position row + open stock chart
+    item.addEventListener('click', () => {
+      // Find the matching row in the positions table
+      const row = document.querySelector(`#positionsBody tr[data-position-id="${p.id}"]`);
+      if (row) row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      // Open the individual stock chart (works for PRO; shows upgrade overlay for free)
+      showStockChart(p);
+    });
+
+    return item;
+  };
+
+  leftCol.forEach(p  => colLeftEl.appendChild(renderItem(p)));
+  rightCol.forEach(p => colRightEl.appendChild(renderItem(p)));
+
+  cols.append(colLeftEl, colRightEl);
+  el.appendChild(cols);
 }
 
 
 function renderRecentPerf(positions, histories, period) {
   const canvas = document.getElementById('recentPerfChart');
   if (!canvas) return;
+  if (charts.recentPerf) { charts.recentPerf.destroy(); charts.recentPerf = null; }
 
-  // Use only positions with value > 0 and valid histories
+  // Only positions that have at least 2 price data points in the supplied histories
   const activePosns = positions.filter(p => p.value > 0 && histories[p.id]?.length >= 2);
   if (!activePosns.length) return;
 
-  // Get dates that exist in ALL active position histories (trading days only)
-  // Use the union of dates, fill forward for missing
-  const dateSet = new Set();
-  activePosns.forEach(p => histories[p.id].forEach(d => dateSet.add(d.date)));
-  let dates = [...dateSet].sort();
-  if (dates.length < 2) return;
+  // ── Build price maps (id -> date -> price) ────────────────────────────────
+  const priceMap = {}; // id -> { date -> price }
+  activePosns.forEach(p => {
+    const m = {};
+    histories[p.id].forEach(d => { m[d.date] = d.price; });
+    priceMap[p.id] = m;
+  });
 
-  // For 1W view: trim to last 7 calendar days of dates + 1 prior day as baseline.
-  // VWD now fetches P1M for 1W (to ensure Friday prior-week is available as baseline
-  // for computing Monday's daily change bar). We then slice down to just what we need.
-  // Also strip any weekend dates — some instruments have Saturday/Sunday data in VWD.
-  const isWeekday = d => { const day = new Date(d + 'T12:00:00').getDay(); return day >= 1 && day <= 5; };
-  if (period === '1W' && dates.length > 1) {
-    const lastDate = new Date(dates[dates.length - 1]);
-    const cutoff = new Date(lastDate);
-    cutoff.setDate(cutoff.getDate() - 7); // 7 calendar days back
-    const cutoffStr = cutoff.toISOString().slice(0, 10);
-    // Keep only weekday dates; display window = strictly after cutoff
-    const displayDates = dates.filter(d => d > cutoffStr && isWeekday(d));
-    const baselineDates = dates.filter(d => d <= cutoffStr && isWeekday(d));
-    const baseline = baselineDates[baselineDates.length - 1];
-    dates = baseline ? [baseline, ...displayDates] : displayDates;
-  } else {
-    // For all other periods, still strip weekends to avoid spurious data points
-    dates = dates.filter(isWeekday);
+  // Sorted union of all dates that appear in price data
+  const allDates = [...new Set(
+    activePosns.flatMap(p => Object.keys(priceMap[p.id]))
+  )].sort();
+
+  if (allDates.length < 2) return;
+
+  // ── Replay transactions to get share count per position on each date ──────
+  // This is the only correct way — using today's p.size retroactively causes
+  // big fake jumps whenever you buy/sell, because the new size gets applied to
+  // every past day.
+  const txList = (globalData.transactions || [])
+    .filter(tx => tx.productId && tx.buysell && tx.quantity)
+    .map(tx => ({
+      id:      String(tx.productId),
+      date:    (tx.date || '').slice(0, 10),
+      buysell: tx.buysell,
+      qty:     Math.abs(tx.quantity),
+    }))
+    .filter(tx => tx.date)
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  // Running holdings: replay to build a snapshot after each transaction
+  const txSnapshots = []; // [{ date, holdings: {id -> qty} }]
+  const running = {};
+  txList.forEach(tx => {
+    if (!running[tx.id]) running[tx.id] = 0;
+    running[tx.id] += tx.buysell === 'B' ? tx.qty : -tx.qty;
+    if (running[tx.id] < 0.001) delete running[tx.id];
+    txSnapshots.push({ date: tx.date, holdings: { ...running } });
+  });
+
+  // Fallback to today's sizes when no transaction history is available
+  const todaySizes = {};
+  activePosns.forEach(p => { todaySizes[String(p.id)] = p.size; });
+
+  // Binary search: holdings as of a given date (last snapshot <= date)
+  const getHoldings = txSnapshots.length
+    ? (date) => {
+        let lo = 0, hi = txSnapshots.length - 1, best = null;
+        while (lo <= hi) {
+          const mid = (lo + hi) >> 1;
+          if (txSnapshots[mid].date <= date) { best = txSnapshots[mid].holdings; lo = mid + 1; }
+          else hi = mid - 1;
+        }
+        return best || {};
+      }
+    : () => todaySizes;
+
+  // ── Compute daily portfolio % change for each trading day ─────────────────
+  //
+  // daily % = (portfolioValue(today) − portfolioValue(yesterday)) / portfolioValue(yesterday) × 100
+  // Both values are converted to EUR using the static FX rate derived from
+  // current positions (same approach as the main perf chart).
+
+  // Build FX rate map: native currency → EUR conversion factor per position
+  const fxRates = {};
+  activePosns.forEach(p => {
+    if (p.price > 0 && p.size !== 0) {
+      fxRates[String(p.id)] = p.value / (p.price * p.size);
+    }
+  });
+
+  // Portfolio value in EUR on a given date
+  const lastKnown = {};
+  const portfolioValueOnDate = (date, holdings) => {
+    let total = 0;
+    let anyPriced = false;
+    for (const [id, shares] of Object.entries(holdings)) {
+      if (shares <= 0) continue;
+      const fx = fxRates[id] || 1;
+      const price = priceMap[id]?.[date];
+      if (price) {
+        lastKnown[id] = price;
+        total += price * shares * fx;
+        anyPriced = true;
+      } else if (lastKnown[id]) {
+        total += lastKnown[id] * shares * fx;
+        anyPriced = true;
+      }
+    }
+    return anyPriced ? total : null;
+  };
+
+  const barDates = [];
+  const dailyChangePct = [];
+
+  // Today's date (local) — used to detect whether the last bar is today
+  const localToday = (() => {
+    const d = new Date();
+    return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+  })();
+
+  // Scraped today P&L from DEGIRO's own DOM — the only reliable intraday figure.
+  const scrapedTodayPL    = globalData._todayPL;
+  const scrapedPortValue  = globalData._scrapedPortfolioValue;
+  const scrapedTodayPct   = (scrapedTodayPL != null && scrapedPortValue != null && scrapedPortValue > 0)
+    ? (scrapedTodayPL / (scrapedPortValue - scrapedTodayPL)) * 100
+    : null;
+
+  for (let i = 1; i < allDates.length; i++) {
+    const today = allDates[i];
+    const yest  = allDates[i - 1];
+
+    // For today's bar: use the scraped DEGIRO figure when available.
+    if (today === localToday && scrapedTodayPct != null) {
+      barDates.push(today);
+      dailyChangePct.push(scrapedTodayPct);
+      continue;
+    }
+
+    // Use yesterday's holdings for both values — captures the return from price
+    // movement only, not from new cash added via buys/sells on this day.
+    const holdings = getHoldings(yest);
+    const valToday = portfolioValueOnDate(today, holdings);
+    const valYest  = portfolioValueOnDate(yest, holdings);
+
+    if (valToday != null && valYest != null && valYest > 0) {
+      barDates.push(today);
+      dailyChangePct.push((valToday - valYest) / valYest * 100);
+    }
   }
 
-  // Build fill-forward price lookup per position (O(n) per position)
-  const filledPrices = {}; // id -> sorted array of {date, price}
-  activePosns.forEach(p => {
-    const sorted = [...histories[p.id]].sort((a, b) => a.date.localeCompare(b.date));
-    filledPrices[p.id] = sorted;
-  });
-
-  const lastSeen = {}; // fill-forward cache per position
-  const getFilledPrice = (id, date) => {
-    // Binary search for latest price <= date
-    const arr = filledPrices[id];
-    if (!arr?.length) return lastSeen[id] ?? null;
-    let lo = 0, hi = arr.length - 1, res = null;
-    while (lo <= hi) {
-      const mid = (lo + hi) >> 1;
-      if (arr[mid].date <= date) { res = arr[mid].price; lo = mid + 1; }
-      else hi = mid - 1;
-    }
-    if (res) lastSeen[id] = res;
-    return res ?? lastSeen[id] ?? null;
-  };
-
-  // Find first date where all positions that CAN be priced at the baseline are priced.
-  // Only require a position if fill-forward can produce a price at the baseline date —
-  // i.e. it has at least one data point on or before dates[0].
-  // Positions bought mid-period (first data after baseline) are excluded from the
-  // requirement and handled via fill-forward once they appear. Without this, a mid-week
-  // purchase would push firstValidDate past the baseline, losing a bar from the chart.
-  const posnsWithData = activePosns.filter(p =>
-    getFilledPrice(p.id, dates[0]) != null
-  );
-  const firstValidDate = dates.find(date =>
-    posnsWithData.every(p => getFilledPrice(p.id, date) != null)
-  );
-  if (!firstValidDate) return;
-
-  const dailyValues = dates.filter(d => d >= firstValidDate).map(date => {
-    let total = 0;
-    activePosns.forEach(p => {
-      const price = getFilledPrice(p.id, date);
-      if (price) total += price * p.size;
-    });
-    return { date, value: total };
-  }).filter(d => d.value > 0);
-
-  if (dailyValues.length < 2) return;
-
-  // Daily % change bars — skip first day (no prior)
-  const barDates = dailyValues.slice(1).map(d => d.date);
-  const dailyChangePct = dailyValues.slice(1).map((d, i) => {
-    const prev = dailyValues[i].value;
-    return prev > 0 ? ((d.value - prev) / prev) * 100 : 0;
-  });
-
-  const fmtDate = d => {
-    const [y,m,dd] = d.split('-');
-    return new Date(y,m-1,dd).toLocaleDateString('default',{day:'numeric',month:'short'});
-  };
+  if (barDates.length < 1) return;
 
   globalData.recentPerfDates = barDates;
 
-  // Compound return for the visible window
-  const compoundReturn = dailyValues.length >= 2
-    ? ((dailyValues[dailyValues.length-1].value / dailyValues[0].value) - 1) * 100
-    : 0;
+  const fmtDate = d => {
+    const [y, m, dd] = d.split('-');
+    return new Date(y, m - 1, dd).toLocaleDateString('default', { day: 'numeric', month: 'short' });
+  };
+
+  // Compound return for the badge
+  const compoundReturn = dailyChangePct.reduce((acc, r) => acc * (1 + r / 100), 1);
+  const compoundPct = (compoundReturn - 1) * 100;
 
   const recentBadgePlugin = {
     id: 'recentBadge',
     afterDraw(chart) {
       const ctx2 = chart.ctx;
       const { right, top } = chart.chartArea;
-      const label = (compoundReturn >= 0 ? '+' : '') + compoundReturn.toFixed(2) + '%';
-      const color = compoundReturn >= 0 ? '#2ACA69' : '#FF4757';
+      const label = (compoundPct >= 0 ? '+' : '') + compoundPct.toFixed(2) + '%';
+      const color = compoundPct >= 0 ? '#2ACA69' : '#FF4757';
       ctx2.save();
       ctx2.font = 'bold 20px Syne, sans-serif';
       const textW = ctx2.measureText(label).width;
       const padX = 11, boxH = 28;
       const boxW = textW + padX * 2;
-      // Position: top-right corner, sitting just above the chart area (in chart padding)
       const boxX = right - boxW;
-      const boxY = top - boxH - 6; // above the bars so never overlaps
+      const boxY = top - boxH - 6;
       ctx2.fillStyle = color + '18';
       ctx2.strokeStyle = color + '44';
       ctx2.lineWidth = 1;
@@ -1355,7 +1616,6 @@ function renderRecentPerf(positions, histories, period) {
     }
   };
 
-  if (charts.recentPerf) charts.recentPerf.destroy();
   charts.recentPerf = new Chart(canvas, {
     type: 'bar',
     plugins: [recentBadgePlugin],
@@ -1365,29 +1625,30 @@ function renderRecentPerf(positions, histories, period) {
         label: 'Daily Change',
         data: dailyChangePct,
         backgroundColor: dailyChangePct.map(v => v >= 0 ? '#2ACA6955' : '#FF475755'),
-        borderColor: dailyChangePct.map(v => v >= 0 ? '#2ACA69' : '#FF4757'),
+        borderColor:     dailyChangePct.map(v => v >= 0 ? '#2ACA69'   : '#FF4757'),
         borderWidth: 1,
         borderRadius: 2,
       }]
     },
     options: {
       responsive: true, maintainAspectRatio: false,
-      layout: { padding: { top: 40 } },   // reserve space above bars for the % return badge
+      layout: { padding: { top: 40 } },
       plugins: {
         legend: { display: false },
         tooltip: {
           backgroundColor: '#1E2C3A', borderColor: '#2A3A4A', borderWidth: 1,
           titleColor: '#F5F7FA', bodyColor: '#8B9BB4', padding: 10,
-          callbacks: { label: ctx => ' '+(ctx.parsed.y>=0?'+':'')+ctx.parsed.y.toFixed(2)+'%' }
+          callbacks: { label: ctx => ' ' + (ctx.parsed.y >= 0 ? '+' : '') + ctx.parsed.y.toFixed(2) + '%' }
         }
       },
       scales: {
         x: { grid: { display: false }, ticks: { color: '#8B9BB4', font: { size: 10 }, maxTicksLimit: 12 } },
-        y: { grid: { color: '#1E2C3A88' }, ticks: { color: '#8B9BB4', font: { size: 10 }, callback: v => (v>=0?'+':'')+v.toFixed(1)+'%' } }
+        y: { grid: { color: '#1E2C3A88' }, ticks: { color: '#8B9BB4', font: { size: 10 }, callback: v => (v >= 0 ? '+' : '') + v.toFixed(1) + '%' } }
       }
     }
   });
 }
+
 
 function parseVwdSeries(json) {
   // VWD format: {start: "YYYY-MM-DDT...", series: [{times: "start/P1D", data: [[dayOffset, price], ...]}]}
@@ -1399,7 +1660,10 @@ function parseVwdSeries(json) {
     return priceSeries.data.map(([offset, price]) => {
       const d = new Date(startDate);
       d.setDate(d.getDate() + offset);
-      return { date: d.toISOString().slice(0,10), price };
+      const yyyy = d.getFullYear();
+      const mm   = String(d.getMonth() + 1).padStart(2, '0');
+      const dd   = String(d.getDate()).padStart(2, '0');
+      return { date: `${yyyy}-${mm}-${dd}`, price };
     }).filter(d => d.price != null);
   } catch(e) { console.warn('parseVwdSeries error:', e); return []; }
 }
@@ -1409,7 +1673,7 @@ function buildHoldingsOverTime(transactions, dates) {
   const result = {};
   const holdings = {};
   let txIdx = 0;
-  const sortedTx = [...transactions].sort((a,b) => new Date(a.date)-new Date(b.date));
+  const sortedTx = [...transactions].sort((a, b) => a.date.localeCompare(b.date));
   sortedTx.forEach(t => { if (t.date) t.date = t.date.slice(0,10); });
 
   dates.forEach(date => {
@@ -1561,16 +1825,43 @@ function renderDividendChart(dividends) {
   });
 }
 
+// Annualised volatility for a single position (std dev of daily log returns × √252)
+function computePositionVolatility(positionId) {
+  const hist = (globalData.priceHistories5Y || {})[positionId];
+  if (!hist || hist.length < 20) return null;
+  const returns = [];
+  for (let i = 1; i < hist.length; i++) {
+    if (hist[i].price > 0 && hist[i - 1].price > 0) {
+      returns.push(Math.log(hist[i].price / hist[i - 1].price));
+    }
+  }
+  if (returns.length < 10) return null;
+  const mean = returns.reduce((s, r) => s + r, 0) / returns.length;
+  const variance = returns.reduce((s, r) => s + (r - mean) ** 2, 0) / (returns.length - 1);
+  return Math.sqrt(variance) * Math.sqrt(252) * 100; // annualised %
+}
+
 function renderPositionsTable(positions, sortCol, sortDir) {
   // Determine sort state — default: value descending
   sortCol = sortCol || globalData._posSort?.col || 'value';
   sortDir = sortDir || globalData._posSort?.dir || 'desc';
   globalData._posSort = { col: sortCol, dir: sortDir };
 
+  // Pre-compute volatility for all positions
+  const volCache = {};
+  positions.forEach(p => { volCache[p.id] = computePositionVolatility(p.id); });
+
+  // Total portfolio cost basis for attribution calculation
+  const totalCostBasis = positions.reduce((s, p) => {
+    const unrealized = p.plUnrealized ?? p.plBase;
+    return s + (p.value - unrealized);
+  }, 0);
+
   const valueOf = (p, col) => {
     const unrealized = p.plUnrealized ?? p.plBase;
     const costBasis = p.value - unrealized;
     const plPct = costBasis > 0 ? (unrealized / costBasis * 100) : 0;
+    const attrib = totalCostBasis > 0 ? (unrealized / totalCostBasis * 100) : 0;
     switch (col) {
       case 'name':   return (p.name || 'ID ' + p.id).toLowerCase();
       case 'currency': return p.currency;
@@ -1579,6 +1870,8 @@ function renderPositionsTable(positions, sortCol, sortDir) {
       case 'value':  return p.value;
       case 'pl':     return p.plBase;
       case 'plpct':  return plPct;
+      case 'attrib': return attrib;
+      case 'vol':    return volCache[p.id] ?? -1;
       default:       return p.value;
     }
   };
@@ -1589,13 +1882,13 @@ function renderPositionsTable(positions, sortCol, sortDir) {
     return sortDir === 'asc' ? cmp : -cmp;
   });
 
-  // Update header arrows
+  // Update header arrows (use innerHTML to preserve <br> in multi-line headers)
   document.querySelectorAll('#positionsTable thead th').forEach(th => {
     const col = th.dataset.col;
     th.classList.toggle('sort-active', col === sortCol);
     // Strip old arrow, add new one
-    th.textContent = th.textContent.replace(/ [▲▼]$/, '');
-    if (col === sortCol) th.textContent += sortDir === 'asc' ? ' ▲' : ' ▼';
+    th.innerHTML = th.innerHTML.replace(/ [▲▼]$/, '');
+    if (col === sortCol) th.innerHTML += sortDir === 'asc' ? ' ▲' : ' ▼';
   });
 
   const tbody = document.getElementById('positionsBody');
@@ -1609,6 +1902,9 @@ function renderPositionsTable(positions, sortCol, sortDir) {
     const plPctClass = plPct >= 0 ? 'positive' : 'negative';
 
     const tr = document.createElement('tr');
+    tr.dataset.positionId = p.id;
+    tr.style.cursor = 'pointer';
+    tr.addEventListener('click', () => showStockChart(p));
 
     // Name cell with colored dot
     const tdName = document.createElement('td'); tdName.className = 'td-name';
@@ -1624,7 +1920,18 @@ function renderPositionsTable(positions, sortCol, sortDir) {
     const tdPL    = document.createElement('td'); tdPL.className    = plClass    + ' sensitive'; tdPL.textContent    = (pl    >= 0 ? '+' : '') + fmtEur(pl);
     const tdPLPct = document.createElement('td'); tdPLPct.className = plPctClass + ' sensitive'; tdPLPct.textContent = (plPct >= 0 ? '+' : '') + plPct.toFixed(1) + '%';
 
-    tr.append(tdName, tdCurr, tdSize, tdPrice, tdValue, tdPL, tdPLPct);
+    const attrib = totalCostBasis > 0 ? (unrealized / totalCostBasis * 100) : 0;
+    const attribClass = attrib >= 0 ? 'positive' : 'negative';
+    const tdAttrib = document.createElement('td');
+    tdAttrib.className = attribClass + ' sensitive td-attrib';
+    tdAttrib.textContent = (attrib >= 0 ? '+' : '') + attrib.toFixed(2) + '%';
+
+    const vol = volCache[p.id];
+    const tdVol = document.createElement('td');
+    tdVol.className = 'td-vol';
+    tdVol.textContent = vol != null ? vol.toFixed(1) + '%' : '—';
+
+    tr.append(tdName, tdCurr, tdSize, tdPrice, tdValue, tdPL, tdPLPct, tdAttrib, tdVol);
     tbody.appendChild(tr);
   });
 
@@ -1657,97 +1964,7 @@ function renderPositionsTable(positions, sortCol, sortDir) {
  * Affected tickers historically: TSLA, AAPL, NVDA, AMZN, GOOGL and others.
  * If a user reports a missing or incorrect closed position, a stock split is the likely cause.
  */
-function computeClosedPositions(transactions, names, meta) {
-  const byProduct = {};
-  transactions.forEach(tx => {
-    const id = tx.productId;
-    if (!byProduct[id]) byProduct[id] = [];
-    byProduct[id].push(tx);
-  });
-
-  const closed = [];
-
-  Object.entries(byProduct).forEach(([id, txs]) => {
-    const sorted = [...txs].sort((a, b) => a.date.localeCompare(b.date));
-    const buyQueue = [];
-    let totalSoldQty = 0;
-    let totalBuyCostEUR = 0;
-    let totalSellProcEUR = 0;
-    let netQty = 0;
-
-    // ── Historical currency effect (realised FX P&L on sold lots) ──
-    // For each matched lot: fxImpact = matchedQty × buyNativePrice × (sellFX − buyFX)
-    // This isolates how much the EUR↔native exchange rate change contributed
-    // to the realised P&L, separate from the product's own price movement.
-    let realizedFxPL = 0;
-
-    // Detect if this product is non-EUR: check meta first, else infer from first buy's FX rate
-    const productCurrency = meta?.[id]?.currency || '';
-    let isNonEUR = productCurrency !== '' && productCurrency !== 'EUR';
-
-    sorted.forEach(tx => {
-      const qty = Math.abs(tx.quantity);
-      const eurPerShare = qty > 0 ? Math.abs(tx.totalInBaseCurrency) / qty : 0;
-      const nativePrice = tx.price;
-      // Implied FX rate: EUR per 1 unit of native currency.
-      // Subtract fees for a cleaner FX rate (fees inflate totalInBaseCurrency).
-      const fees = Math.abs(tx.totalFeesInBaseCurrency || 0) + Math.abs(tx.autoFxFeeInBaseCurrency || 0);
-      const eurExFees = Math.abs(tx.totalInBaseCurrency) - fees;
-      const impliedFX = (nativePrice > 0 && qty > 0 && eurExFees > 0)
-        ? eurExFees / (nativePrice * qty)
-        : 1;
-
-      if (tx.buysell === 'B') {
-        netQty += qty;
-        buyQueue.push({ qty, eurPerShare, nativePrice, fx: impliedFX });
-        // If we didn't know the currency, infer from FX rate deviation
-        if (!productCurrency && Math.abs(impliedFX - 1) > 0.05) isNonEUR = true;
-      } else {
-        netQty -= qty;
-        const sellFX = impliedFX;
-        let remaining = qty;
-        while (remaining > 0.0001 && buyQueue.length > 0) {
-          const lot = buyQueue[0];
-          const matched = Math.min(lot.qty, remaining);
-          totalBuyCostEUR += matched * lot.eurPerShare;
-          totalSoldQty += matched;
-
-          // FX impact on this matched lot:
-          // matchedQty × buyNativePrice × (sellFX − buyFX)
-          if (isNonEUR && lot.nativePrice > 0) {
-            realizedFxPL += matched * lot.nativePrice * (sellFX - lot.fx);
-          }
-
-          lot.qty -= matched;
-          remaining -= matched;
-          if (lot.qty < 0.0001) buyQueue.shift();
-        }
-        totalSellProcEUR += Math.abs(tx.totalInBaseCurrency);
-      }
-    });
-
-    // Include both fully closed (netQty ≈ 0) AND partially closed (has sells but still holds some)
-    if (totalSoldQty > 0) {
-      const isPartial = netQty > 0.5;
-      const realizedPL = totalSellProcEUR - totalBuyCostEUR;
-      const plPct = totalBuyCostEUR > 0 ? (realizedPL / totalBuyCostEUR) * 100 : 0;
-      closed.push({
-        id,
-        name: names?.[id] || 'ID ' + id,
-        currency: productCurrency || 'EUR',
-        totalSold: totalSoldQty,
-        avgBuyPrice: totalSoldQty > 0 ? totalBuyCostEUR / totalSoldQty : 0,
-        avgSellPrice: totalSoldQty > 0 ? totalSellProcEUR / totalSoldQty : 0,
-        realizedPL,
-        plPct,
-        isPartial,
-        realizedFxPL: isNonEUR ? Math.round(realizedFxPL * 100) / 100 : 0,
-      });
-    }
-  });
-
-  return closed.sort((a, b) => Math.abs(b.realizedPL) - Math.abs(a.realizedPL));
-}
+// computeClosedPositions is now in utils.js (shared with popup.js)
 
 function renderClosedPositionsTable(closedPositions, sortCol, sortDir) {
   globalData.closedPositions = closedPositions;
@@ -1800,6 +2017,9 @@ function renderClosedPositionsTable(closedPositions, sortCol, sortDir) {
     const plClass    = p.realizedPL >= 0 ? 'positive' : 'negative';
     const plPctClass = p.plPct >= 0 ? 'positive' : 'negative';
     const tr = document.createElement('tr');
+    tr.dataset.positionId = p.id;
+    tr.style.cursor = 'pointer';
+    tr.addEventListener('click', () => showStockChart(p, true));
 
     const tdName = document.createElement('td'); tdName.className = 'td-name';
     const dot = document.createElement('span');
@@ -1850,6 +2070,329 @@ function wirePositionsTabs() {
     const isOpen = btn.dataset.tab === 'open';
     document.getElementById('positionsTable').style.display       = isOpen ? '' : 'none';
     document.getElementById('closedPositionsTable').style.display = isOpen ? 'none' : '';
+    // Clear row highlights in both tables and destroy existing chart
+    document.querySelectorAll('#positionsBody tr, #closedPositionsBody tr').forEach(tr => tr.classList.remove('row-selected'));
+    if (charts.stockChart) { charts.stockChart.destroy(); charts.stockChart = null; }
+    // Auto-load chart for first position in the newly selected tab
+    if (isOpen) {
+      const first = globalData.positions?.[0];
+      if (first) showStockChart(first, false);
+    } else {
+      const first = globalData.closedPositions?.[0];
+      if (first) showStockChart(first, true);
+    }
+  });
+}
+
+// ── Individual stock chart ──────────────────────────────────────────────────
+async function showStockChart(position, isClosed, { scroll = true } = {}) {
+  const container = document.getElementById('stockChartContainer');
+  const titleEl   = document.getElementById('stockChartTitle');
+  const metaEl    = document.getElementById('stockChartMeta');
+  const closeBtn  = document.getElementById('stockChartClose');
+
+  // Pro gate — show blurred placeholder chart with upgrade overlay
+  if (!proUnlocked) {
+    if (!container) return;
+    container.style.display = 'block';
+
+    // Only build the placeholder once
+    if (!container.dataset.placeholderBuilt) {
+      container.dataset.placeholderBuilt = '1';
+      container.innerHTML = `
+        <div class="stock-chart-header">
+          <div class="stock-chart-title">Stock Price Chart</div>
+          <div class="stock-chart-meta">Your holdings · all-time</div>
+        </div>
+        <div class="chart-wrap chart-wrap--stock stock-chart-blur-wrap">
+          <canvas id="stockChartPlaceholder"></canvas>
+        </div>
+      `;
+
+      // Generate a realistic-looking fake price series
+      const placeholderPrices = (() => {
+        const pts = 120;
+        const data = [];
+        let v = 150 + Math.random() * 50;
+        for (let i = 0; i < pts; i++) {
+          v = Math.max(50, v + (Math.random() - 0.47) * 6);
+          data.push(parseFloat(v.toFixed(2)));
+        }
+        return data;
+      })();
+      const isUp = placeholderPrices[placeholderPrices.length - 1] >= placeholderPrices[0];
+      const lineColor = isUp ? '#2ACA69' : '#FF4757';
+      const fillColor = isUp ? 'rgba(42,202,105,0.08)' : 'rgba(255,71,87,0.08)';
+
+      const phCanvas = document.getElementById('stockChartPlaceholder');
+      if (phCanvas) {
+        if (charts.stockChartPlaceholder) { charts.stockChartPlaceholder.destroy(); }
+        charts.stockChartPlaceholder = new Chart(phCanvas.getContext('2d'), {
+          type: 'line',
+          data: {
+            labels: placeholderPrices.map((_, i) => i),
+            datasets: [{ data: placeholderPrices, borderColor: lineColor, backgroundColor: fillColor, fill: true, borderWidth: 1.5, pointRadius: 0, tension: 0.3 }]
+          },
+          options: {
+            responsive: true, maintainAspectRatio: false, animation: false,
+            plugins: { legend: { display: false }, tooltip: { enabled: false } },
+            scales: {
+              x: { display: false },
+              y: { display: false }
+            }
+          }
+        });
+      }
+
+      // Overlay on top of the blurred chart
+      showProOverlay(container, 'Stock Price Charts');
+    }
+
+    if (scroll) container.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    return;
+  }
+  const canvas    = document.getElementById('stockChart');
+  if (!container || !canvas) return;
+
+  // Highlight selected row in the correct table
+  const bodyId = isClosed ? 'closedPositionsBody' : 'positionsBody';
+  document.querySelectorAll('#positionsBody tr, #closedPositionsBody tr').forEach(tr => tr.classList.remove('row-selected'));
+  document.querySelectorAll(`#${bodyId} tr`).forEach(tr => {
+    tr.classList.toggle('row-selected', tr.dataset.positionId === position.id);
+  });
+
+  // Show container with loading state
+  container.style.display = 'block';
+  titleEl.textContent = position.name || 'Stock';
+  metaEl.textContent = 'Loading price history…';
+  if (scroll) container.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
+  // Wire close button (only once)
+  if (!closeBtn.dataset.wired) {
+    closeBtn.dataset.wired = '1';
+    closeBtn.addEventListener('click', () => {
+      container.style.display = 'none';
+      document.querySelectorAll('#positionsBody tr, #closedPositionsBody tr').forEach(tr => tr.classList.remove('row-selected'));
+      if (charts.stockChart) { charts.stockChart.destroy(); charts.stockChart = null; }
+    });
+  }
+
+  // Find first buy and last sell dates from transactions
+  const txs = globalData.transactions || [];
+  const buys  = txs.filter(tx => tx.productId === position.id && tx.buysell === 'B');
+  const sells = txs.filter(tx => tx.productId === position.id && tx.buysell === 'S');
+  const firstBuyDate = buys.length  > 0 ? buys[0].date                    : null;
+  const lastSellDate = sells.length > 0 ? sells[sells.length - 1].date    : null;
+  // For closed positions cap chart at last sell; open positions show through today
+  const chartEndDate = isClosed && lastSellDate ? lastSellDate : null;
+
+  // Fetch price history for this single stock
+  const vwdEntry = globalData.vwdIds?.[position.id];
+  if (!vwdEntry) {
+    metaEl.textContent = 'Chart not available — no market data identifier for this product.';
+    return;
+  }
+
+  // Try progressively longer periods until we get data that covers the buy date.
+  // Start with the best guess based on holding time, escalate if the VWD API
+  // returns nothing or doesn't reach back far enough.
+  const periodLadder = ['1M', '6M', '1Y', '2Y', '3Y', '5Y'];
+  let startIdx = 0;
+  if (firstBuyDate) {
+    const endMs = isClosed && lastSellDate ? new Date(lastSellDate + 'T12:00:00').getTime() : Date.now();
+    const holdingDays = Math.ceil((endMs - new Date(firstBuyDate + 'T12:00:00').getTime()) / 86400000);
+    if (holdingDays <= 30)        startIdx = 0;
+    else if (holdingDays <= 180)  startIdx = 1;
+    else if (holdingDays <= 365)  startIdx = 2;
+    else if (holdingDays <= 730)  startIdx = 3;
+    else if (holdingDays <= 1095) startIdx = 4;
+    else                          startIdx = 5;
+  }
+
+  let priceData = null;
+  for (let pi = startIdx; pi < periodLadder.length; pi++) {
+    try {
+      const resp = await chrome.runtime.sendMessage({
+        type: 'FETCH_PRICE_HISTORY',
+        vwdIds: { [position.id]: vwdEntry },
+        period: periodLadder[pi]
+      });
+      const d = resp?.[position.id];
+      if (d && d.length > 0) {
+        priceData = d;
+        // If data starts on or before first buy, we have enough coverage
+        if (!firstBuyDate || d[0].date <= firstBuyDate) break;
+        // Otherwise keep escalating to get older data
+      }
+    } catch(e) { /* try next period */ }
+  }
+
+  if (!priceData || priceData.length === 0) {
+    metaEl.textContent = 'Chart not available — price history could not be loaded.';
+    return;
+  }
+
+  // Filter to dates on or after first buy
+  let filtered = priceData;
+  if (firstBuyDate) {
+    filtered = priceData.filter(d => d.date >= firstBuyDate);
+    if (filtered.length === 0) filtered = priceData;
+  }
+  // For closed positions, cap at last sell date
+  if (chartEndDate) {
+    const capped = filtered.filter(d => d.date <= chartEndDate);
+    if (capped.length > 0) filtered = capped;
+  }
+
+  const labels = filtered.map(d => d.date);
+  const prices = filtered.map(d => d.price);
+
+  // Compute stats
+  const firstPrice = prices[0];
+  const lastPrice  = prices[prices.length - 1];
+  const pricePL    = lastPrice - firstPrice;
+  const pricePLPct = firstPrice > 0 ? ((lastPrice / firstPrice - 1) * 100) : 0;
+  const isUp       = pricePL >= 0;
+  const lineColor  = isUp ? '#2ACA69' : '#FF4757';
+  const fillColor  = isUp ? 'rgba(42,202,105,0.08)' : 'rgba(255,71,87,0.08)';
+
+  // Build meta line
+  const currencySymbol = position.currency === 'USD' ? '$' : position.currency === 'GBP' ? '£' : position.currency === 'EUR' ? '€' : position.currency + ' ';
+  const plSign = pricePL >= 0 ? '+' : '';
+  if (isClosed && firstBuyDate && lastSellDate) {
+    const realizedPL    = position.realizedPL ?? 0;
+    const realizedSign  = realizedPL >= 0 ? '+' : '';
+    const realizedColor = realizedPL >= 0 ? '#2ACA69' : '#FF4757';
+    const plPctStr      = position.plPct != null ? ` (${realizedSign}${position.plPct.toFixed(1)}%)` : '';
+    metaEl.innerHTML =
+      `<span style="color:var(--text-muted)">Closed · ${firstBuyDate} → ${lastSellDate}</span>` +
+      `<span style="color:${realizedColor};margin-left:12px">Realized: ${realizedSign}${fmtEur(realizedPL)}${plPctStr}</span>` +
+      `<span style="color:var(--text-muted);margin-left:12px">Price: ${currencySymbol}${lastPrice.toFixed(2)} (${plSign}${pricePLPct.toFixed(1)}% over period)</span>`;
+  } else {
+    metaEl.innerHTML =
+      `<span style="color:var(--text)">${currencySymbol}${lastPrice.toFixed(2)}</span>` +
+      `<span style="color:${lineColor};margin-left:12px">${plSign}${pricePL.toFixed(2)} (${plSign}${pricePLPct.toFixed(1)}%)</span>` +
+      `<span style="color:var(--muted);margin-left:12px">${firstBuyDate ? 'Since ' + firstBuyDate : 'All available data'}</span>`;
+  }
+
+  // Build buy/sell markers
+  const buyAnnotations = buys.map(tx => ({
+    date: tx.date, price: tx.price, type: 'B', qty: Math.abs(tx.quantity)
+  }));
+  const sellAnnotations = sells.map(tx => ({
+    date: tx.date, price: tx.price, type: 'S', qty: Math.abs(tx.quantity)
+  }));
+  const allAnnotations = [...buyAnnotations, ...sellAnnotations];
+
+  // Destroy previous chart
+  if (charts.stockChart) { charts.stockChart.destroy(); charts.stockChart = null; }
+
+  // Build datasets
+  const datasets = [{
+    data: prices,
+    borderColor: lineColor,
+    backgroundColor: fillColor,
+    fill: true,
+    borderWidth: 1.5,
+    pointRadius: 0,
+    pointHitRadius: 6,
+    tension: 0.15,
+  }];
+
+  // Add buy/sell marker datasets
+  const buyPoints = new Array(labels.length).fill(null);
+  const sellPoints = new Array(labels.length).fill(null);
+  allAnnotations.forEach(ann => {
+    const idx = labels.indexOf(ann.date);
+    if (idx === -1) return;
+    // Use the actual chart price for the Y coordinate so dots sit on the line
+    if (ann.type === 'B') buyPoints[idx] = prices[idx];
+    else sellPoints[idx] = prices[idx];
+  });
+
+  if (buyPoints.some(v => v !== null)) {
+    datasets.push({
+      data: buyPoints,
+      borderColor: '#2ACA69',
+      backgroundColor: '#2ACA69',
+      pointRadius: 5,
+      pointStyle: 'triangle',
+      showLine: false,
+      label: 'Buy',
+    });
+  }
+  if (sellPoints.some(v => v !== null)) {
+    datasets.push({
+      data: sellPoints,
+      borderColor: '#FF4757',
+      backgroundColor: '#FF4757',
+      pointRadius: 5,
+      pointStyle: 'triangle',
+      rotation: 180,
+      showLine: false,
+      label: 'Sell',
+    });
+  }
+
+  // Format dates the same way as the Capital Appreciation chart: "Sept 2025"
+  const fmtStockDate = d => {
+    const [y, m] = d.split('-');
+    return new Date(y, m - 1).toLocaleString('default', { month: 'short', year: 'numeric' });
+  };
+  // Tick labels: only show when the month/year string changes, to avoid crowding
+  let lastTickLabel = '';
+  const tickLabels = labels.map(d => {
+    const lbl = fmtStockDate(d);
+    if (lbl === lastTickLabel) return null;
+    lastTickLabel = lbl;
+    return lbl;
+  });
+
+  charts.stockChart = new Chart(canvas.getContext('2d'), {
+    type: 'line',
+    data: { labels, datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: '#1E2C3A', borderColor: '#2A3A4A', borderWidth: 1,
+          titleColor: '#F5F7FA', bodyColor: '#8B9BB4', padding: 10,
+          callbacks: {
+            title: ctx => {
+              const d = labels[ctx[0]?.dataIndex];
+              return d ? fmtStockDate(d) : '';
+            },
+            label: ctx => {
+              if (ctx.datasetIndex === 0) return ` ${currencySymbol}${ctx.parsed.y.toFixed(2)}`;
+              // Buy/sell marker tooltip
+              const ann = allAnnotations.find(a => a.date === labels[ctx.dataIndex]);
+              if (ann) return ` ${ann.type === 'B' ? '▲ Buy' : '▼ Sell'}: ${ann.qty} shares @ ${currencySymbol}${ann.price.toFixed(2)}`;
+              return null;
+            },
+            filter: ctx => ctx.parsed.y !== null,
+          }
+        }
+      },
+      scales: {
+        x: {
+          grid: { color: '#1E2C3A' },
+          ticks: {
+            color: '#8B9BB4', font: { size: 10 }, maxTicksLimit: 10,
+            callback: function(val) { return tickLabels[val] || null; }
+          }
+        },
+        y: {
+          grid: { color: '#1E2C3A88' },
+          ticks: {
+            color: '#8B9BB4', font: { size: 10 },
+            callback: v => currencySymbol + v.toFixed(2)
+          }
+        }
+      }
+    }
   });
 }
 
@@ -1898,13 +2441,15 @@ function renderMoreInfo(positions, dividends, transactions) {
   });
   const totalFxPL = unrealizedFxPL + realizedFxPL;
 
-  // ── 3. Total realized gains ──────────────────────────────────────
-  const totalRealized = positions.reduce((s, p) => s + (p.plBase - (p.plUnrealized ?? p.plBase)), 0);
+  // ── 3. Total realized gains — derived from computeClosedPositions for consistency ──
+  const closedForGain = computeClosedPositions(transactions, globalData.names, globalData.data?.productInfo ? extractProductMeta(globalData.data.productInfo).meta : {});
+  const totalRealized = closedForGain.reduce((s, cp) => s + cp.realizedPL, 0);
 
-  const makeStat = (label, value, sub, colorClass, tooltip) => {
+  const makeStat = (label, value, sub, colorClass, tooltip, chartKey) => {
     const stat = document.createElement('div');
-    stat.className = 'more-info-stat' + (tooltip ? ' more-info-stat--tip' : '');
+    stat.className = 'more-info-stat' + (tooltip ? ' more-info-stat--tip' : '') + (chartKey ? ' more-info-stat--clickable' : '');
     if (tooltip) stat.dataset.tip = tooltip;
+    if (chartKey) stat.dataset.chartKey = chartKey;
     const lbl = document.createElement('div'); lbl.className = 'more-info-stat-label'; lbl.textContent = label;
     const val = document.createElement('div');
     val.className = 'more-info-stat-value sensitive' + (colorClass ? ' ' + colorClass : '');
@@ -1917,22 +2462,95 @@ function renderMoreInfo(positions, dividends, transactions) {
     return stat;
   };
 
+  // ── Build cumulative time-series data for charts ──
+
+  // Dividends cumulative (sorted chronologically)
+  const divSorted = [...dividends].sort((a, b) => a.date.localeCompare(b.date));
+  const divSeries = [];
+  let divCum = 0;
+  divSorted.forEach(d => { divCum += d.amountEUR || 0; divSeries.push({ date: d.date, value: divCum }); });
+
+  // Fees cumulative (from raw transactions, sorted by date)
+  const rawTx = globalData.data?.transactions?.data || [];
+  let totalFees = 0, txFees = 0, fxFees = 0;
+  const feeTxSorted = rawTx
+    .map(t => ({
+      date: normalizeDate(t.date),
+      fee: Math.abs(parseFloat(t.totalFeesInBaseCurrency) || 0) + Math.abs(parseFloat(t.autoFxFeeInBaseCurrency) || 0),
+      txFee: Math.abs(parseFloat(t.totalFeesInBaseCurrency) || 0),
+      fxFee: Math.abs(parseFloat(t.autoFxFeeInBaseCurrency) || 0),
+    }))
+    .filter(t => t.date)
+    .sort((a, b) => a.date.localeCompare(b.date));
+  const feeSeries = [];
+  let feeCum = 0;
+  feeTxSorted.forEach(t => {
+    feeCum += t.fee;
+    txFees += t.txFee;
+    fxFees += t.fxFee;
+    feeSeries.push({ date: t.date, value: feeCum });
+  });
+  totalFees = txFees + fxFees;
+
+  // Realized gains cumulative — mirrors computeClosedPositions FIFO exactly
+  // Walk each product's transactions independently, collect per-sell gain events, then sort by date
+  const gainEvents = []; // [{date, gain}]
+  const byProduct = {};
+  transactions.forEach(tx => {
+    if (!byProduct[tx.productId]) byProduct[tx.productId] = [];
+    byProduct[tx.productId].push(tx);
+  });
+  Object.values(byProduct).forEach(txs => {
+    const sorted = [...txs].sort((a, b) => a.date.localeCompare(b.date));
+    const buyQueue = [];
+    sorted.forEach(tx => {
+      const qty = Math.abs(tx.quantity);
+      const eurPerShare = qty > 0 ? Math.abs(tx.totalInBaseCurrency) / qty : 0;
+      if (tx.buysell === 'B') {
+        buyQueue.push({ qty, eurPerShare });
+      } else if (tx.buysell === 'S') {
+        let remaining = qty;
+        let costBasis = 0;
+        while (remaining > 0.0001 && buyQueue.length > 0) {
+          const lot = buyQueue[0];
+          const matched = Math.min(lot.qty, remaining);
+          costBasis += matched * lot.eurPerShare;
+          lot.qty -= matched;
+          remaining -= matched;
+          if (lot.qty < 0.0001) buyQueue.shift();
+        }
+        const sellProceeds = Math.abs(tx.totalInBaseCurrency);
+        gainEvents.push({ date: tx.date, gain: sellProceeds - costBasis });
+      }
+    });
+  });
+  gainEvents.sort((a, b) => a.date.localeCompare(b.date));
+  const gainSeries = [];
+  let gainCum = 0;
+  gainEvents.forEach(e => { gainCum += e.gain; gainSeries.push({ date: e.date, value: gainCum }); });
+
+  // Store series for chart rendering
+  const chartData = {
+    dividends: divSeries,
+    fees: feeSeries,
+    realized: gainSeries,
+  };
+
   // Dividends stat
   grid.appendChild(makeStat(
-    'Dividends received (all-time)',
+    'Dividends received',
     (totalDividends >= 0 ? '+' : '') + fmtEur(totalDividends),
     dividends.length > 0 ? `${dividends.length} payments · gross before tax` : 'No dividend history found',
-    totalDividends > 0 ? 'positive' : ''
+    totalDividends > 0 ? 'positive' : '',
+    null,
+    divSeries.length > 1 ? 'dividends' : null
   ));
 
-  // Currency effect stat — combines unrealized (open positions) + realized (sold lots)
+  // Currency effect stat — no time series available, not clickable
   const fxTooltip = 'Impact of exchange rate movements separate from product performance. Includes both open and closed positions.';
   const fxClass = totalFxPL >= 0 ? 'positive' : 'negative';
-  const fxParts = [];
-  if (fxPositions > 0) fxParts.push(`${(unrealizedFxPL >= 0 ? '+' : '') + fmtEur(unrealizedFxPL)} unrealized`);
-  if (closedFxCount > 0) fxParts.push(`${(realizedFxPL >= 0 ? '+' : '') + fmtEur(realizedFxPL)} realized`);
-  const fxSub = fxParts.length > 0
-    ? fxParts.join(' · ')
+  const fxSub = (fxPositions > 0 || closedFxCount > 0)
+    ? 'Open + closed positions · all-time'
     : 'No non-EUR positions';
   grid.appendChild(makeStat(
     'Currency effect',
@@ -1944,36 +2562,137 @@ function renderMoreInfo(positions, dividends, transactions) {
 
   // Realized gains stat
   grid.appendChild(makeStat(
-    'Realized gains (closed positions)',
+    'Realized gains',
     (totalRealized >= 0 ? '+' : '') + fmtEur(totalRealized),
     'From fully or partially sold positions',
-    totalRealized >= 0 ? 'positive' : 'negative'
+    totalRealized >= 0 ? 'positive' : 'negative',
+    null,
+    gainSeries.length > 1 ? 'realized' : null
   ));
 
-  // ── 4. Total fees paid — sourced from raw transaction fields already fetched ──
-  // totalFeesInBaseCurrency = trading commissions per trade
-  // autoFxFeeInBaseCurrency = FX conversion fee per trade
-  const rawTx = globalData.data?.transactions?.data || [];
-  let totalFees = 0;
-  let txFees = 0, fxFees = 0;
-  for (const t of rawTx) {
-    txFees += Math.abs(parseFloat(t.totalFeesInBaseCurrency) || 0);
-    fxFees += Math.abs(parseFloat(t.autoFxFeeInBaseCurrency) || 0);
-  }
-  totalFees = txFees + fxFees;
-
+  // Fees stat — % of P&L rendered as a small inline badge, not at headline font size
   const feeBreakdownParts = [];
-  if (txFees > 0) feeBreakdownParts.push(`${fmtEur(txFees)} trading commissions`);
+  if (txFees > 0) feeBreakdownParts.push(`${fmtEur(txFees)} commissions`);
   if (fxFees > 0) feeBreakdownParts.push(`${fmtEur(fxFees)} FX fees`);
-  const feeSub = feeBreakdownParts.length > 0 ? feeBreakdownParts.join(' · ') : 'All-time · across all trades';
+  const feeSub = feeBreakdownParts.length > 0 ? feeBreakdownParts.join(' \u00b7 ') : 'All-time \u00b7 across all trades';
 
-  grid.appendChild(makeStat(
-    'Total fees paid (all-time)',
+  // Fee impact as % of P&L — scraped value preferred, falls back to sum of open position P&L
+  const totalPLForFeeImpact = (() => {
+    if (typeof globalData._scrapedTotalPnL === 'number') return globalData._scrapedTotalPnL;
+    return (globalData.positions || []).reduce((s, p) => s + (p.pl || 0), 0);
+  })();
+
+  const feeStat = makeStat(
+    'Total fees paid',
     totalFees > 0 ? '-' + fmtEur(totalFees) : fmtEur(0),
     feeSub,
     totalFees > 0 ? 'negative' : '',
-    'Sum of all trading commissions (feeInBaseCurrency) and FX conversion fees (autoFxFeeInBaseCurrency) across all your trades since account opening.'
-  ));
+    null,
+    feeSeries.length > 1 ? 'fees' : null
+  );
+
+  if (totalFees > 0 && totalPLForFeeImpact > 0) {
+    const feeImpactPct = (totalFees / totalPLForFeeImpact) * 100;
+    const badge = document.createElement('span');
+    badge.textContent = feeImpactPct.toFixed(1) + '% of P&L';
+    badge.style.cssText = 'font-family:var(--font-mono);font-size:11px;font-weight:400;color:var(--muted);margin-left:8px;opacity:0.8;vertical-align:middle;';
+    feeStat.querySelector('.more-info-stat-value').appendChild(badge);
+  }
+
+  grid.appendChild(feeStat);
+
+  // ── Wire clickable stats to show cumulative chart ──
+  const chartWrap = document.getElementById('moreInfoChartWrap');
+  const chartCanvas = document.getElementById('moreInfoChart');
+  let activeKey = null;
+
+  grid.addEventListener('click', (e) => {
+    const stat = e.target.closest('.more-info-stat--clickable');
+    if (!stat) return;
+    const key = stat.dataset.chartKey;
+    if (!key || !chartData[key] || chartData[key].length < 2) return;
+
+    // Toggle: clicking same stat again hides the chart
+    if (activeKey === key) {
+      chartWrap.style.display = 'none';
+      activeKey = null;
+      grid.querySelectorAll('.more-info-stat--clickable').forEach(s => s.classList.remove('more-info-stat--active'));
+      return;
+    }
+
+    activeKey = key;
+    grid.querySelectorAll('.more-info-stat--clickable').forEach(s => s.classList.remove('more-info-stat--active'));
+    stat.classList.add('more-info-stat--active');
+    chartWrap.style.display = 'block';
+
+    const series = chartData[key];
+    const labels = series.map(d => d.date);
+    const values = series.map(d => d.value);
+    const lastVal = values[values.length - 1];
+    const isPositive = key === 'fees' ? false : lastVal >= 0;
+    const lineColor = isPositive ? '#2ACA69' : '#FF4757';
+    const fillColor = isPositive ? 'rgba(42,202,105,0.08)' : 'rgba(255,71,87,0.08)';
+
+    // Date formatting — same style as stock charts
+    const fmtDate = d => {
+      const [y, m] = d.split('-');
+      return new Date(y, m - 1).toLocaleString('default', { month: 'short', year: 'numeric' });
+    };
+    let lastTickLabel = '';
+    const tickLabels = labels.map(d => {
+      const lbl = fmtDate(d);
+      if (lbl === lastTickLabel) return null;
+      lastTickLabel = lbl;
+      return lbl;
+    });
+
+    if (charts.moreInfoChart) { charts.moreInfoChart.destroy(); charts.moreInfoChart = null; }
+
+    charts.moreInfoChart = new Chart(chartCanvas.getContext('2d'), {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [{
+          data: values,
+          borderColor: lineColor,
+          backgroundColor: fillColor,
+          fill: true,
+          borderWidth: 1.5,
+          pointRadius: 0,
+          pointHitRadius: 6,
+          tension: 0.15,
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            backgroundColor: '#1E2C3A', borderColor: '#2A3A4A', borderWidth: 1,
+            titleColor: '#F5F7FA', bodyColor: '#8B9BB4', padding: 10,
+            callbacks: {
+              title: ctx => { const d = labels[ctx[0]?.dataIndex]; return d ? fmtDate(d) : ''; },
+              label: ctx => ` ${key === 'fees' ? '-' : ''}${fmtEur(Math.abs(ctx.parsed.y))}`,
+            }
+          }
+        },
+        scales: {
+          x: {
+            grid: { color: '#1E2C3A' },
+            ticks: { color: '#8B9BB4', font: { size: 10 }, maxTicksLimit: 8, callback: function(val) { return tickLabels[val] || null; } }
+          },
+          y: {
+            grid: { color: '#1E2C3A88' },
+            ticks: {
+              color: '#8B9BB4', font: { size: 10 },
+              callback: v => (key === 'fees' ? '-' : '') + fmtEur(Math.abs(v))
+            }
+          }
+        }
+      }
+    });
+  });
 
 }
 
@@ -2257,6 +2976,7 @@ async function renderCorrelationMatrix(positions, vwdIds, names) {
       }
     }
     const wac = wacDen > 0 ? wacNum / wacDen : null;
+    if (wac !== null) globalData.insightWAC = wac; // expose to grade engine
 
     if (wac !== null) {
       const wacBox = document.createElement('div');
@@ -2530,15 +3250,25 @@ async function renderCorrelationMatrix(positions, vwdIds, names) {
   });
 }
 
-function wireCorrelationToggle() {
-  const btn = document.getElementById('btnCorrelation');
-  if (!btn || btn.dataset.wired) return;
-  btn.dataset.wired = '1';
+async function wireCorrelationToggle() {
+  const card = document.getElementById('correlationCard');
+  if (!card || card.dataset.wired) return;
+  card.dataset.wired = '1';
 
-  // ── Title hover tooltip (always available, even before matrix is opened) ──
+  // Add PRO badge when not unlocked
+  if (!proUnlocked) {
+    const title = document.getElementById('corrInfoIcon');
+    if (title && !title.querySelector('.pro-badge')) {
+      const badge = document.createElement('span');
+      badge.className = 'pro-badge';
+      badge.textContent = 'PRO';
+      title.appendChild(badge);
+    }
+  }
+
+  // ── Title hover tooltip ──
   const infoIcon = document.getElementById('corrInfoIcon');
   if (infoIcon) {
-    // Ensure the shared tooltip element exists
     let infoTip = document.getElementById('corrTooltip');
     if (!infoTip) {
       infoTip = document.createElement('div');
@@ -2557,13 +3287,11 @@ function wireCorrelationToggle() {
       infoTip.innerHTML = INFO_TEXT;
       infoTip.className = 'corr-tooltip corr-tooltip--info';
       infoTip.style.display = 'block';
-      // Position below-right of icon, clamped to viewport
       const rect = infoIcon.getBoundingClientRect();
       const vw = document.documentElement.clientWidth;
       const vh = document.documentElement.clientHeight;
       let x = rect.left;
       let y = rect.bottom + 6;
-      // Force a layout pass so offsetWidth is accurate
       requestAnimationFrame(() => {
         const tw = infoTip.offsetWidth  || 300;
         const th = infoTip.offsetHeight || 100;
@@ -2576,30 +3304,2732 @@ function wireCorrelationToggle() {
 
     infoIcon.addEventListener('mouseleave', () => {
       infoTip.style.display = 'none';
-      infoTip.className = 'corr-tooltip'; // reset class
+      infoTip.className = 'corr-tooltip';
     });
   }
 
-  btn.addEventListener('click', async () => {
-    const content = document.getElementById('correlationContent');
-    const isOpen  = content.style.display !== 'none';
-    if (isOpen) {
-      content.style.display = 'none';
-      btn.textContent = '⊕ Show matrix';
-      btn.classList.remove('open');
+  // Auto-render content on Insights tab open
+  const heatmap = document.getElementById('correlationHeatmap');
+  if (!proUnlocked) {
+    // Show blurred placeholder
+    if (!heatmap.dataset.placeholderBuilt) {
+      heatmap.dataset.placeholderBuilt = '1';
+
+      const fakeNames = ['Stock A', 'Stock B', 'Stock C', 'Stock D', 'Stock E'];
+      const n = fakeNames.length;
+      const fakeMatrix = Array.from({ length: n }, (_, i) =>
+        Array.from({ length: n }, (_, j) => {
+          if (i === j) return 1.0;
+          return parseFloat(Math.max(-1, Math.min(1, (Math.random() * 1.6 - 0.8))).toFixed(2));
+        })
+      );
+      for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) fakeMatrix[j][i] = fakeMatrix[i][j];
+
+      const corrColor = v => {
+        const c = Math.max(-1, Math.min(1, v));
+        const t = Math.pow(Math.abs(c), 0.6);
+        return c >= 0
+          ? `rgb(${Math.round(30+t*194)},${Math.round(44+t*38)},${Math.round(58+t*24)})`
+          : `rgb(${Math.round(30+t*16)},${Math.round(44+t*160)},${Math.round(58+t*55)})`;
+      };
+
+      const table = document.createElement('table');
+      table.className = 'correlation-table corr-blur-wrap';
+
+      const thead = table.createTHead();
+      const hrow = thead.insertRow();
+      const corner = document.createElement('th'); corner.className = 'row-label'; hrow.appendChild(corner);
+      fakeNames.forEach(name => {
+        const th = document.createElement('th'); th.className = 'col-header-cell';
+        const outer = document.createElement('div'); outer.className = 'col-label-outer';
+        const span = document.createElement('span'); span.className = 'col-label-text'; span.textContent = name;
+        outer.appendChild(span); th.appendChild(outer); hrow.appendChild(th);
+      });
+
+      const tbody = table.createTBody();
+      fakeNames.forEach((rowName, i) => {
+        const tr = tbody.insertRow();
+        const th = document.createElement('th'); th.className = 'row-label'; th.textContent = rowName; tr.appendChild(th);
+        fakeMatrix[i].forEach((v, j) => {
+          const td = tr.insertCell();
+          td.style.background = corrColor(v);
+          td.style.color = Math.abs(v) > 0.15 ? '#F5F7FA' : '#C0C8D4';
+          td.textContent = v.toFixed(2);
+          if (i === j) td.classList.add('corr-diag');
+        });
+      });
+
+      heatmap.innerHTML = '';
+      heatmap.classList.add('pro-placeholder-box');
+      heatmap.appendChild(table);
+      showProOverlay(heatmap, 'Correlation Matrix');
+    }
+  } else {
+    // Render real matrix
+    if (!heatmap.dataset.rendered) {
+      heatmap.dataset.rendered = '1';
+      await renderCorrelationMatrix(
+        globalData.positions,
+        globalData.vwdIds,
+        globalData.names
+      );
+    }
+  }
+}
+
+// ── CSV Export ──────────────────────────────────────────────────────────────
+
+// ── Pro header button ──────────────────────────────────────────────────────
+function wireProButton() {
+  const btn = document.getElementById('btnPro');
+  if (!btn) return;
+
+  if (proUnlocked) {
+    btn.classList.add('pro-active');
+    btn.title = 'Sharpe Pro — Active. Click to view subscription details.';
+    btn.style.cursor = 'pointer';
+    if (!btn.dataset.wiredPro) {
+      btn.dataset.wiredPro = '1';
+      btn.addEventListener('click', () => showProStatusModal());
+    }
+  } else {
+    btn.classList.remove('pro-active');
+    btn.title = 'Activate Sharpe Pro';
+    if (!btn.dataset.wiredPro) {
+      btn.dataset.wiredPro = '1';
+      btn.addEventListener('click', () => showLicenseModal());
+    }
+  }
+}
+
+/** Create a download-icon button. If locked=true, clicking opens the Pro upgrade flow instead of exporting. */
+function makeExportBtn(title, onClick, locked) {
+  const btn = document.createElement('button');
+  btn.className = 'btn-export' + (locked ? ' btn-export--locked' : '');
+  btn.title = locked ? 'Upgrade to Pro to export' : title;
+  btn.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
+  btn.addEventListener('click', e => {
+    e.stopPropagation();
+    if (locked) {
+      chrome.tabs.create({ url: PRO_CONFIG.checkoutUrl });
     } else {
-      content.style.display = 'block';
-      btn.textContent = '⊖ Hide matrix';
-      btn.classList.add('open');
-      // Render lazily — only when first opened
-      if (!document.getElementById('correlationHeatmap').dataset.rendered) {
-        document.getElementById('correlationHeatmap').dataset.rendered = '1';
-        await renderCorrelationMatrix(
-          globalData.positions,
-          globalData.vwdIds,
-          globalData.names
-        );
-      }
+      onClick();
     }
   });
+  return btn;
+}
+
+function wireExportButtons() {
+  // Export buttons always rendered; non-Pro users see a locked variant that
+  // triggers the upgrade flow instead of downloading.
+  const locked = !proUnlocked;
+
+  // 1. Capital Appreciation chart
+  const perfHeader = document.querySelector('#performanceChart')?.closest('.card')?.querySelector('.card-header');
+  if (perfHeader && !perfHeader.querySelector('.btn-export')) {
+    perfHeader.appendChild(makeExportBtn('Export chart data as CSV', exportCapitalAppreciation, locked));
+  }
+
+  // 2. Allocation chart
+  const allocHeader = document.querySelector('#allocationChart')?.closest('.card')?.querySelector('.card-header');
+  if (allocHeader && !allocHeader.querySelector('.btn-export')) {
+    allocHeader.appendChild(makeExportBtn('Export allocation as CSV', exportAllocation, locked));
+  }
+
+  // 3. Recent Activity card
+  const moversHeader = document.getElementById('moversCard')?.querySelector('.card-header');
+  if (moversHeader && !moversHeader.querySelector('.btn-export')) {
+    moversHeader.appendChild(makeExportBtn('Export recent performance as CSV', exportRecentPerf, locked));
+  }
+
+  // 4. Positions table (open + closed)
+  const posHeader = document.querySelector('#positionsTable')?.closest('.card')?.querySelector('.card-header');
+  if (posHeader && !posHeader.querySelector('.btn-export')) {
+    posHeader.appendChild(makeExportBtn('Export positions as CSV', exportPositions, locked));
+  }
+
+  // 5. Correlation matrix
+  const corrHeader = document.getElementById('correlationCard')?.querySelector('.card-header');
+  if (corrHeader && !corrHeader.querySelector('.btn-export')) {
+    corrHeader.appendChild(makeExportBtn('Export correlation matrix as CSV', exportCorrelation, locked));
+  }
+}
+
+function exportCapitalAppreciation() {
+  const series = globalData.portfolioSeries;
+  const eurSeries = globalData.eurSeries;
+  if (!series || series.length === 0) return;
+  const headers = ['Date', 'TWR %', 'Portfolio Value (EUR)'];
+  const rows = series.map((d, i) => [
+    d.date,
+    (d.twr ?? d.twrDisplay ?? 0).toFixed(2),
+    eurSeries?.[i]?.value?.toFixed(2) ?? ''
+  ]);
+  downloadCSV('capital_appreciation.csv', headers, rows);
+}
+
+function exportAllocation() {
+  const positions = globalData.positions;
+  if (!positions?.length) return;
+
+  const posFiltered = positions.filter(p => p.value > 0);
+  const total = posFiltered.reduce((s, p) => s + p.value, 0);
+
+  // Helper: build sorted {labels, values} for a given mode
+  function getAllocData(mode) {
+    let map = {};
+    if (mode === 'position') {
+      const sorted = [...posFiltered].sort((a, b) => b.value - a.value);
+      return { labels: sorted.map(p => p.name || 'ID ' + p.id), values: sorted.map(p => p.value) };
+    } else if (mode === 'currency') {
+      posFiltered.forEach(p => { map[p.currency] = (map[p.currency] || 0) + p.value; });
+    } else if (mode === 'geography') {
+      posFiltered.forEach(p => { const g = inferGeo(p); map[g] = (map[g] || 0) + p.value; });
+    } else { // assetclass
+      posFiltered.forEach(p => { const c = inferAssetClass(p); map[c] = (map[c] || 0) + p.value; });
+      const cashValue = globalData._cashValue || 0;
+      if (cashValue > 0) map['Cash'] = (map['Cash'] || 0) + cashValue;
+    }
+    const sorted = Object.entries(map).sort((a, b) => b[1] - a[1]);
+    return { labels: sorted.map(([k]) => k), values: sorted.map(([, v]) => v) };
+  }
+
+  // Build one CSV with all four views separated by a blank row and a section header
+  const sections = [
+    { mode: 'position',   title: 'Holdings' },
+    { mode: 'currency',   title: 'Currency' },
+    { mode: 'geography',  title: 'Geography' },
+    { mode: 'assetclass', title: 'Asset Class' },
+  ];
+
+  const escape = v => {
+    const s = String(v ?? '');
+    return s.includes(',') || s.includes('"') || s.includes('\n') ? '"' + s.replace(/"/g, '""') + '"' : s;
+  };
+
+  const lines = [];
+  sections.forEach(({ mode, title }, si) => {
+    if (si > 0) lines.push(''); // blank separator row
+    lines.push(escape(title)); // section heading
+    lines.push(['Category', 'Value (EUR)', 'Weight %'].map(escape).join(','));
+    const { labels, values } = getAllocData(mode);
+    labels.forEach((l, i) => {
+      lines.push([escape(l), values[i].toFixed(2), (values[i] / total * 100).toFixed(1)].join(','));
+    });
+  });
+
+  const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'allocation.csv'; a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function exportRecentPerf() {
+  const dates = globalData.recentPerfDates;
+  const chart = charts.recentPerf;
+  if (!dates || !chart) return;
+  const data = chart.data.datasets[0].data;
+  const headers = ['Date', 'Daily Change %'];
+  const rows = dates.map((d, i) => [d, (data[i] ?? 0).toFixed(4)]);
+  downloadCSV('recent_performance.csv', headers, rows);
+}
+
+function exportPositions() {
+  const positions = globalData.positions || [];
+  const closed = globalData.closedPositions || [];
+  const isOpenTab = document.getElementById('positionsTable')?.style.display !== 'none';
+
+  if (isOpenTab) {
+    const headers = ['Name', 'Currency', 'Shares', 'Price', 'Value (EUR)', 'P&L (EUR)', 'P&L %'];
+    const rows = positions.map(p => {
+      const unrealized = p.plUnrealized ?? p.plBase;
+      const costBasis = p.value - unrealized;
+      const plPct = costBasis > 0 ? (unrealized / costBasis * 100) : 0;
+      return [p.name || 'ID ' + p.id, p.currency, p.size, p.price.toFixed(2), p.value.toFixed(2), p.plBase.toFixed(2), plPct.toFixed(1)];
+    });
+    downloadCSV('open_positions.csv', headers, rows);
+  } else {
+    const headers = ['Name', 'Currency', 'Shares Sold', 'Avg Buy (EUR)', 'Avg Sell (EUR)', 'Realized P&L (EUR)', 'P&L %'];
+    const rows = closed.map(c => [c.name, c.currency, c.totalSold.toFixed(2), c.avgBuyPrice.toFixed(2), c.avgSellPrice.toFixed(2), c.realizedPL.toFixed(2), c.plPct.toFixed(1)]);
+    downloadCSV('closed_positions.csv', headers, rows);
+  }
+}
+
+function exportCorrelation() {
+  const wrap = document.getElementById('correlationHeatmap');
+  if (!wrap || !wrap.dataset.rendered) return;
+  const table = wrap.querySelector('table');
+  if (!table) return;
+  const headerCells = table.querySelectorAll('thead th');
+  const colNames = [...headerCells].slice(1).map(th => th.textContent.trim()); // skip corner cell
+  const bodyRows = table.querySelectorAll('tbody tr');
+  const headers = ['', ...colNames];
+  const rows = [...bodyRows].map(tr => {
+    const rowLabel = tr.querySelector('th')?.textContent.trim() || '';
+    const cells = tr.querySelectorAll('td');
+    return [rowLabel, ...[...cells].map(td => td.textContent.trim())];
+  });
+  downloadCSV('correlation_matrix.csv', headers, rows);
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── Rate My Portfolio — scoring engine & UI wiring ───────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+
+const SLIDER_DESCS = {
+  risk: {
+    1: 'Capital preservation is your top priority',
+    2: 'Very conservative — bonds, metals, money market',
+    3: 'Conservative — mostly large-cap funds and ETFs',
+    4: 'Moderately conservative — blue-chip equities with some bonds',
+    5: 'Balanced — mix of equities and defensive assets',
+    6: 'Moderate growth — mostly equities, some sector bets',
+    7: 'Growth-oriented — individual stocks across sectors',
+    8: 'Aggressive — small-caps, high-growth, concentrated positions',
+    9: 'Very aggressive — leveraged products, high volatility',
+    10: 'Maximum risk — derivatives, options, speculative plays',
+  },
+  involvement: {
+    1: 'Buy once, check yearly',
+    2: 'Review a couple of times a year',
+    3: 'Check in quarterly, occasional rebalance',
+    4: 'Monthly reviews, occasional trades',
+    5: 'Regular monitoring, a few trades per month',
+    6: 'Active — weekly reviews, frequent trades',
+    7: 'Hands-on — multiple trades per week',
+    8: 'Very active — daily monitoring and trading',
+    9: 'Near day-trading — multiple trades daily',
+    10: 'Full-time day trader',
+  },
+  goal: {
+    1: 'Need regular income from my portfolio now',
+    2: 'Primarily seeking steady dividend income',
+    3: 'Income-focused with some growth',
+    4: 'Balanced — income and moderate growth',
+    5: 'Leaning toward growth with some income',
+    6: 'Growth-focused, dividends are a bonus',
+    7: 'Primarily capital appreciation',
+    8: 'Aggressive growth over income',
+    9: 'Maximum long-term capital gains',
+    10: 'Pure wealth accumulation, no income needed',
+  },
+  horizon: {
+    1: 'Need access to funds within 1 year',
+    2: '1–2 year horizon',
+    3: '2–3 years',
+    4: '3–5 years',
+    5: '5–7 years',
+    6: '7–10 years',
+    7: '10–15 years',
+    8: '15–20 years',
+    9: '20–30 years',
+    10: '30+ years — multi-generational wealth',
+  },
+  complexity: {
+    1: 'One or two broad index funds, nothing more',
+    2: 'A handful of ETFs, fully passive',
+    3: 'A few funds/ETFs, maybe one individual stock',
+    4: 'Mix of ETFs and some individual stocks',
+    5: 'Comfortable with 10–15 positions',
+    6: 'Fine managing diverse holdings',
+    7: 'Multiple asset classes and geographies',
+    8: 'Comfortable with options or leveraged products',
+    9: 'Complex portfolio with many instruments',
+    10: 'Any instrument, any market, any complexity',
+  },
+};
+
+function wireGradeCard() {
+  const card = document.getElementById('portfolioGradeCard');
+  if (!card || card.dataset.wired) return;
+  card.dataset.wired = '1';
+
+  const content = document.getElementById('gradeContent');
+  const survey = document.getElementById('gradeSurvey');
+  const results = document.getElementById('gradeResults');
+
+  // ── Pro badge on card title (shown for both free and Pro) ──
+  if (!proUnlocked) {
+    const title = card.querySelector('.card-title');
+    if (title && !title.querySelector('.pro-badge')) {
+      const badge = document.createElement('span');
+      badge.className = 'pro-badge';
+      badge.textContent = 'PRO';
+      title.appendChild(badge);
+    }
+    // Free users: survey is fully usable, but results are gated.
+    // The survey wiring continues below — the gate happens in renderGradeResults.
+  }
+
+  // Slider interactivity — update value display and description
+  const sliderMap = {
+    sliderRisk:       { val: 'sliderValRisk',       desc: 'sliderDescRisk',       key: 'risk' },
+    sliderInvolvement:{ val: 'sliderValInvolvement', desc: 'sliderDescInvolvement',key: 'involvement' },
+    sliderGoal:       { val: 'sliderValGoal',        desc: 'sliderDescGoal',       key: 'goal' },
+    sliderHorizon:    { val: 'sliderValHorizon',     desc: 'sliderDescHorizon',    key: 'horizon' },
+    sliderComplexity: { val: 'sliderValComplexity',  desc: 'sliderDescComplexity', key: 'complexity' },
+  };
+
+  Object.entries(sliderMap).forEach(([sliderId, { val, desc, key }]) => {
+    const slider = document.getElementById(sliderId);
+    const valEl = document.getElementById(val);
+    const descEl = document.getElementById(desc);
+    if (!slider) return;
+    const update = () => {
+      const v = parseInt(slider.value);
+      valEl.textContent = v;
+      descEl.textContent = SLIDER_DESCS[key][v] || '';
+    };
+    slider.addEventListener('input', update);
+    update(); // initial
+  });
+
+  // Restore saved survey answers
+  chrome.storage.local.get('gradeAnswers', ({ gradeAnswers }) => {
+    if (!gradeAnswers) return;
+    Object.entries(sliderMap).forEach(([sliderId, { key }]) => {
+      const slider = document.getElementById(sliderId);
+      if (slider && gradeAnswers[key] !== undefined) {
+        slider.value = gradeAnswers[key];
+        slider.dispatchEvent(new Event('input'));
+      }
+    });
+    // Auto-render results if we have saved answers and portfolio data
+    if (globalData.positions?.length > 0) {
+      const gradeData = computePortfolioGrade(gradeAnswers, globalData);
+      renderGradeResults(gradeData, results);
+      survey.style.display = 'none';
+      results.style.display = 'block';
+    }
+  });
+
+  // Submit
+  document.getElementById('btnGradeSubmit').addEventListener('click', () => {
+    const answers = {
+      risk: parseInt(document.getElementById('sliderRisk').value),
+      involvement: parseInt(document.getElementById('sliderInvolvement').value),
+      goal: parseInt(document.getElementById('sliderGoal').value),
+      horizon: parseInt(document.getElementById('sliderHorizon').value),
+      complexity: parseInt(document.getElementById('sliderComplexity').value),
+    };
+    chrome.storage.local.set({ gradeAnswers: answers });
+    const gradeData = computePortfolioGrade(answers, globalData);
+    renderGradeResults(gradeData, results);
+    survey.style.display = 'none';
+    results.style.display = 'block';
+  });
+}
+
+// ── Scoring Engine ──────────────────────────────────────────────────────────
+
+/**
+ * Compute portfolio grade from survey answers + portfolio data.
+ * Returns { overall, subs: [{name, score, grade, detail}], narrative }.
+ * Each sub-score is 0–100, mapped to a letter grade.
+ */
+function computePortfolioGrade(answers, gd) {
+  const positions = gd.positions || [];
+  const transactions = gd.transactions || [];
+  const dividends = gd.dividends || [];
+  const totalValue = positions.reduce((s, p) => s + p.value, 0);
+
+  // ── Helper: sigmoid curve for smooth scoring ──
+  // Maps a "distance" (0 = perfect, higher = worse) to a 0–100 score
+  // k controls steepness, midpoint controls where score = 50
+  const sigmoidScore = (distance, midpoint, k) => {
+    return 100 / (1 + Math.exp(k * (distance - midpoint)));
+  };
+
+  // ── Helper: compute Herfindahl-Hirschman Index ──
+  const hhi = (values) => {
+    const total = values.reduce((s, v) => s + v, 0);
+    if (total === 0) return 0;
+    return values.reduce((s, v) => s + (v / total) ** 2, 0);
+  };
+
+  // ── Gather portfolio characteristics ──────────────────────────────────
+
+  // Asset class distribution
+  const assetClasses = {};
+  positions.forEach(p => {
+    const cls = inferAssetClass(p);
+    assetClasses[cls] = (assetClasses[cls] || 0) + p.value;
+  });
+  const equityPct = ((assetClasses['Equity'] || 0) / totalValue) * 100;
+  const bondsPct = ((assetClasses['Bonds'] || 0) / totalValue) * 100;
+  const derivativesPct = ((assetClasses['Derivatives'] || 0) / totalValue) * 100;
+  const moneyMarketPct = ((assetClasses['Money Market'] || 0) / totalValue) * 100;
+  const commoditiesPct = ((assetClasses['Commodities'] || 0) / totalValue) * 100;
+
+  // Implied risk level of portfolio (1–10 scale)
+  // Heavier equity/derivatives = higher risk, bonds/MM = lower
+  const impliedRisk = Math.min(10, Math.max(1,
+    1 +
+    (equityPct / 100) * 5 +
+    (derivativesPct / 100) * 9 +
+    (commoditiesPct / 100) * 3 -
+    (bondsPct / 100) * 3 -
+    (moneyMarketPct / 100) * 4
+  ));
+
+  // Geographic distribution
+  const geos = {};
+  positions.forEach(p => {
+    const geo = inferGeo(p);
+    geos[geo] = (geos[geo] || 0) + p.value;
+  });
+  const geoValues = Object.values(geos);
+
+  // Currency distribution
+  const currencies = {};
+  positions.forEach(p => {
+    currencies[p.currency] = (currencies[p.currency] || 0) + p.value;
+  });
+  // NOTE: currencyValues not used for scoring — instrument currency ≠ underlying exposure
+
+  // Position concentration
+  const positionValues = positions.map(p => p.value).sort((a, b) => b - a);
+  const topPositionPct = totalValue > 0 ? (positionValues[0] / totalValue) * 100 : 0;
+  const top3Pct = totalValue > 0 ? (positionValues.slice(0, 3).reduce((s, v) => s + v, 0) / totalValue) * 100 : 0;
+
+  // Transaction frequency (trades per month over last 12 months)
+  const oneYearAgo = new Date(Date.now() - 365 * 864e5).toISOString().slice(0, 10);
+  const recentTx = transactions.filter(t => t.date >= oneYearAgo);
+  const monthsActive = Math.max(1, (() => {
+    if (recentTx.length === 0) return 1;
+    const first = recentTx[0].date;
+    const last = recentTx[recentTx.length - 1].date;
+    return Math.max(1, (new Date(last) - new Date(first)) / (30 * 864e5));
+  })());
+  const tradesPerMonth = recentTx.length / monthsActive;
+
+  // Dividend yield approximation
+  const oneYearDivs = dividends.filter(d => d.date >= oneYearAgo);
+  const annualDivIncome = oneYearDivs.reduce((s, d) => s + (d.amountEUR || 0), 0);
+  const divYield = totalValue > 0 ? (annualDivIncome / totalValue) * 100 : 0;
+
+  // Portfolio Sharpe ratio — use the value already computed by the chart insight bar
+  // (TWR-based, filters fill-forward zero-return days, matching the displayed value)
+  const portfolioSharpe = gd.insightSharpe ?? null;
+
+  // Number of distinct asset classes and instrument complexity
+  const numAssetClasses = Object.keys(assetClasses).length;
+  const hasDerivatives = derivativesPct > 0;
+  const numPositions = positions.length;
+
+  // ETF vs individual stock ratio
+  const etfValue = positions.filter(p => p.productTypeId === 131 || p.productTypeId === 3).reduce((s, p) => s + p.value, 0);
+  const etfPct = totalValue > 0 ? (etfValue / totalValue) * 100 : 0;
+
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // ── Dimension 1: Risk Alignment (survey-dependent) ──────────────────────
+  // ══════════════════════════════════════════════════════════════════════════
+  const riskGap = Math.abs(answers.risk - impliedRisk);
+  const riskScore = sigmoidScore(riskGap, 3.5, 1.2);
+  let riskShort = '';
+  let riskLong = '';
+  if (riskGap <= 1.5) {
+    riskShort = `Portfolio risk matches your tolerance.`;
+    riskLong  = `Portfolio risk closely matches your stated tolerance (implied risk: ${impliedRisk.toFixed(1)}/10, stated: ${answers.risk}/10).`;
+  } else if (impliedRisk > answers.risk) {
+    riskShort = `Portfolio is more aggressive than your stated tolerance.`;
+    riskLong  = `Portfolio is riskier than your stated tolerance suggests (implied: ${impliedRisk.toFixed(1)}/10, stated: ${answers.risk}/10). `;
+    if (derivativesPct > 5) riskLong += `${derivativesPct.toFixed(0)}% in derivatives is notable for a conservative investor. `;
+    else if (equityPct > 80) riskLong += `${equityPct.toFixed(0)}% equity exposure is high for your comfort level — consider shifting some allocation toward bonds or defensive assets.`;
+    else riskLong += `Consider shifting toward more defensive assets to bring the portfolio in line with your comfort level.`;
+  } else {
+    riskShort = `Portfolio is more conservative than your risk appetite.`;
+    riskLong  = `Portfolio is more conservative than your risk appetite (implied: ${impliedRisk.toFixed(1)}/10, stated: ${answers.risk}/10). You could take on more equity exposure to better match your goals and maximise long-term returns.`;
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // ── Dimension 2: Goal Alignment (survey-dependent) ──────────────────────
+  // ══════════════════════════════════════════════════════════════════════════
+  let goalScore;
+  let goalShort = '';
+  let goalLong = '';
+  if (answers.goal <= 4) {
+    const idealYield = 2 + (4 - answers.goal) * 0.8;
+    const yieldGap = Math.max(0, idealYield - divYield);
+    goalScore = sigmoidScore(yieldGap, 2.5, 1.0);
+    if (divYield >= idealYield * 0.7) {
+      goalShort = `${divYield.toFixed(1)}% yield suits your income focus.`;
+      goalLong  = `Your ${divYield.toFixed(1)}% dividend yield supports your income goal well (target: ~${idealYield.toFixed(1)}%).`;
+    } else if (divYield < 0.5) {
+      goalShort = `Very little income generated (${divYield.toFixed(1)}% yield).`;
+      goalLong  = `With a ${divYield.toFixed(1)}% yield, your portfolio generates very little income for an income-focused strategy. Consider adding dividend-paying ETFs or stocks targeting a yield of ~${idealYield.toFixed(1)}%.`;
+    } else {
+      goalShort = `${divYield.toFixed(1)}% yield is modest for income focus.`;
+      goalLong  = `Your ${divYield.toFixed(1)}% yield is modest for an income-focused strategy (target: ~${idealYield.toFixed(1)}%). Look for higher-yielding dividend stocks or income ETFs to close the gap.`;
+    }
+  } else if (answers.goal >= 7) {
+    const growthTilt = equityPct + derivativesPct * 0.5 - bondsPct * 0.3 - moneyMarketPct * 0.5;
+    goalScore = sigmoidScore(Math.max(0, 70 - growthTilt), 30, 0.12);
+    if (growthTilt >= 70) {
+      goalShort = `Strong equity tilt suits your growth goal.`;
+      goalLong  = `Strong growth positioning with ${equityPct.toFixed(0)}% equities — well aligned with your long-term wealth goal.`;
+    } else {
+      goalShort = `Low equity for a growth strategy (${equityPct.toFixed(0)}%).`;
+      goalLong  = `For a growth strategy, ${equityPct.toFixed(0)}% in equities is below what you'd typically need. Consider reducing defensive allocations and increasing exposure to equity ETFs or growth stocks.`;
+    }
+  } else {
+    const balancePenalty = Math.abs(equityPct - 60) / 2 + Math.abs(bondsPct + moneyMarketPct - 20) / 2;
+    goalScore = sigmoidScore(balancePenalty, 20, 0.15);
+    goalShort = `${equityPct.toFixed(0)}% equities, ${(bondsPct + moneyMarketPct).toFixed(0)}% defensive.`;
+    goalLong  = `Balanced approach with ${equityPct.toFixed(0)}% equities and ${(bondsPct + moneyMarketPct).toFixed(0)}% defensive — a reasonable mix for your balanced goal.`;
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // ── Dimension 3: Time Horizon Fit (survey-dependent) ────────────────────
+  // ══════════════════════════════════════════════════════════════════════════
+  let horizonScore;
+  let horizonShort = '';
+  let horizonLong = '';
+  const defensivePct = bondsPct + moneyMarketPct + commoditiesPct;
+  if (answers.horizon <= 3) {
+    const idealDefensive = 40 + (3 - answers.horizon) * 15;
+    const deficitFromIdeal = Math.max(0, idealDefensive - defensivePct);
+    horizonScore = sigmoidScore(deficitFromIdeal, 25, 0.14);
+    if (defensivePct >= idealDefensive * 0.6) {
+      horizonShort = `Defensive allocation suits your short horizon.`;
+      horizonLong  = `${defensivePct.toFixed(0)}% in defensive assets is appropriate for your ${answers.horizon <= 1 ? '1–2 year' : '2–3 year'} time horizon.`;
+    } else {
+      horizonShort = `High equity for a short time horizon (${equityPct.toFixed(0)}%).`;
+      horizonLong  = `With a ${answers.horizon <= 1 ? '1–2 year' : '2–3 year'} horizon, ${equityPct.toFixed(0)}% in equities carries significant drawdown risk. A market correction could leave you with losses right when you need liquidity. Target at least ${idealDefensive}% in defensive assets (bonds, money market).`;
+    }
+  } else if (answers.horizon >= 7) {
+    const opportunityCost = defensivePct - 20;
+    horizonScore = sigmoidScore(Math.max(0, opportunityCost), 25, 0.14);
+    if (defensivePct <= 25) {
+      horizonShort = `Lean defensive allocation suits your long horizon.`;
+      horizonLong  = `Only ${defensivePct.toFixed(0)}% in defensive assets — appropriate for a ${answers.horizon >= 9 ? '20+' : '10–15'} year horizon where equities have time to recover from downturns.`;
+    } else {
+      horizonShort = `${defensivePct.toFixed(0)}% defensive is conservative for your long horizon.`;
+      horizonLong  = `${defensivePct.toFixed(0)}% in defensive assets is conservative for a ${answers.horizon >= 9 ? '20+' : '10–15'} year horizon. Equities have historically outperformed bonds significantly over long periods — reducing your defensive allocation could meaningfully improve long-term returns.`;
+    }
+  } else {
+    const medPenalty = Math.max(0, equityPct - 80) + Math.max(0, defensivePct - 50);
+    horizonScore = sigmoidScore(medPenalty, 20, 0.15);
+    horizonShort = `Allocation suits your medium-term horizon.`;
+    horizonLong  = `Your ${equityPct.toFixed(0)}% equity / ${defensivePct.toFixed(0)}% defensive split is reasonable for a medium-term horizon.`;
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // ── Dimension 4: Structure Match (survey-dependent) ─────────────────────
+  // ══════════════════════════════════════════════════════════════════════════
+  let structureScore;
+  let structureShort = '';
+  let structureLong = '';
+
+  const expectedComplexity = (answers.complexity + answers.involvement) / 2;
+  const actualComplexity = Math.min(10,
+    (numPositions / 5) +
+    (numAssetClasses / 2) +
+    (hasDerivatives ? 2 : 0) +
+    (1 - etfPct / 100) * 3
+  );
+
+  const complexityGap = Math.abs(expectedComplexity - actualComplexity);
+  structureScore = sigmoidScore(complexityGap, 3, 1.0);
+
+  if (complexityGap <= 2) {
+    structureShort = `Portfolio structure matches your management style.`;
+    structureLong  = `Portfolio structure matches your management style — complexity level is in line with your stated preferences.`;
+  } else if (actualComplexity > expectedComplexity) {
+    const mismatch = [];
+    if (numPositions > 15 && answers.complexity <= 4) mismatch.push(`${numPositions} individual positions`);
+    if (hasDerivatives && answers.complexity <= 5) mismatch.push('derivatives exposure');
+    if (etfPct < 30 && answers.involvement <= 3) mismatch.push(`only ${etfPct.toFixed(0)}% in funds/ETFs`);
+    structureShort = `More complex than your stated preference.`;
+    structureLong  = `Portfolio is more complex than you'd prefer` + (mismatch.length ? ` — ${mismatch.join(', ')}` : '') + `. Consider consolidating into broader ETFs to reduce the management burden.`;
+  } else {
+    structureShort = `Simpler than your complexity preference.`;
+    structureLong  = `Portfolio is simpler than your appetite for complexity. You could add more positions, asset classes, or geographies to match your stated preference.`;
+  }
+
+  if (answers.involvement <= 3 && tradesPerMonth > 4) {
+    structureScore = Math.max(0, structureScore - 15);
+    structureShort = `High trade frequency for a passive investor.`;
+    structureLong += ` ${tradesPerMonth.toFixed(1)} trades/month is high for a passive approach — this may indicate reactive decision-making rather than a deliberate strategy.`;
+  } else if (answers.involvement >= 7 && tradesPerMonth < 1) {
+    structureScore = Math.max(0, structureScore - 10);
+    structureShort = `Low trade frequency for an active strategy.`;
+    structureLong += ` Trading frequency (${tradesPerMonth.toFixed(1)}/month) is low for an active strategy — you may not be capitalising on the opportunities you're watching for.`;
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // ── Dimension 5: Diversification (portfolio-only) ───────────────────────
+  // ══════════════════════════════════════════════════════════════════════════
+  const posHHI = hhi(positionValues);
+  const geoHHI = hhi(geoValues);
+
+  // Ideal HHI for N positions is 1/N (perfectly equal). Penalty based on deviation.
+  // For positions: HHI of 0.15 = well diversified, 0.5+ = very concentrated
+  //
+  // NOTE: Currency HHI is intentionally excluded. On DEGIRO, many international ETFs
+  // (e.g. MSCI World, S&P 500 trackers) are denominated in EUR but provide underlying
+  // exposure to USD, GBP, JPY, etc. Penalising single-currency portfolios would
+  // conflate instrument denomination with actual underlying currency exposure.
+  const diversificationPenalty =
+    posHHI * 45 +                               // position concentration (primary)
+    geoHHI * 25 +                               // geographic concentration
+    (numPositions < 5 ? (5 - numPositions) * 6 : 0);  // too few positions
+
+  const diversificationScore = sigmoidScore(diversificationPenalty, 25, 0.12);
+
+  // Build detail — always explain the score with specific data
+  const geoCount = Object.keys(geos).length;
+  const divDetails = [];
+
+  // Position concentration — always comment
+  if (topPositionPct > 30) {
+    divDetails.push(`Your largest holding is ${topPositionPct.toFixed(0)}% of the portfolio — consider rebalancing.`);
+  } else if (topPositionPct > 15) {
+    divDetails.push(`Your largest holding is ${topPositionPct.toFixed(0)}% — moderate concentration.`);
+  } else {
+    divDetails.push(`No single position dominates (largest is ${topPositionPct.toFixed(0)}%).`);
+  }
+
+  // Top-3 concentration
+  if (top3Pct > 60) {
+    divDetails.push(`Top 3 positions make up ${top3Pct.toFixed(0)}% — high concentration risk.`);
+  } else if (top3Pct > 40) {
+    divDetails.push(`Top 3 positions are ${top3Pct.toFixed(0)}% of the portfolio.`);
+  }
+
+  // Geographic spread
+  if (geoCount <= 2) {
+    divDetails.push(`Only ${geoCount} geographic region${geoCount === 1 ? '' : 's'} represented — consider broader exposure.`);
+  } else if (geoCount === 3) {
+    divDetails.push(`${geoCount} geographic regions — decent but room for wider exposure.`);
+  } else {
+    divDetails.push(`Good geographic spread across ${geoCount} regions.`);
+  }
+
+  // Position count
+  if (numPositions < 5) {
+    divDetails.push(`Only ${numPositions} position${numPositions === 1 ? '' : 's'} — limited diversification.`);
+  } else if (numPositions < 10) {
+    divDetails.push(`${numPositions} positions — adequate but a broader base reduces individual risk.`);
+  }
+
+  // HHI commentary for mid-range scores
+  if (posHHI > 0.15 && topPositionPct <= 30) {
+    divDetails.push(`Position weights are uneven (HHI ${posHHI.toFixed(2)}) — more equal sizing would improve diversification.`);
+  }
+
+  const diversificationLong = divDetails.join(' ');
+  // Short version: most salient fact only
+  const diversificationShort = `Top holding: ${topPositionPct.toFixed(0)}% · ${numPositions} positions · ${geoCount} regions.`;
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // ── Dimension 6: Risk-Adjusted Performance (portfolio-only) ─────────────
+  // ══════════════════════════════════════════════════════════════════════════
+  let perfScore;
+  let perfShort = '';
+  let perfLong = '';
+
+  if (portfolioSharpe !== null) {
+    perfScore = sigmoidScore(Math.max(0, 1.2 - portfolioSharpe), 0.8, 3.5);
+    const sharpeStr = portfolioSharpe.toFixed(2);
+    if (portfolioSharpe >= 1.5) {
+      perfShort = `Excellent Sharpe ratio (${sharpeStr}).`;
+      perfLong  = `Excellent risk-adjusted returns — Sharpe ratio of ${sharpeStr}. Your returns comfortably justify the risk you're taking.`;
+    } else if (portfolioSharpe >= 1.0) {
+      perfShort = `Good Sharpe ratio (${sharpeStr}).`;
+      perfLong  = `Good risk-adjusted returns — Sharpe ratio of ${sharpeStr}. Solid performance relative to portfolio volatility.`;
+    } else if (portfolioSharpe >= 0.5) {
+      perfShort = `Moderate Sharpe ratio (${sharpeStr}).`;
+      perfLong  = `Moderate risk-adjusted returns — Sharpe ratio of ${sharpeStr}. Consider whether the volatility is worth the returns, or if a simpler allocation could achieve similar results with less risk.`;
+    } else if (portfolioSharpe >= 0) {
+      perfShort = `Below-average Sharpe ratio (${sharpeStr}).`;
+      perfLong  = `Below-average risk-adjusted returns — Sharpe ratio of ${sharpeStr}. You're earning above the risk-free rate, but the return doesn't fully compensate for the volatility. Reducing high-volatility, low-return positions could help.`;
+    } else {
+      perfShort = `Negative Sharpe ratio (${sharpeStr}).`;
+      perfLong  = `Negative Sharpe ratio (${sharpeStr}) — returns below the risk-free rate. The portfolio is taking on risk without adequate compensation. Review your worst-performing and most volatile positions.`;
+    }
+  } else {
+    perfScore = 50;
+    perfShort = 'Not enough data for Sharpe calculation.';
+    perfLong  = 'Not enough historical data to assess risk-adjusted performance. More trading days are needed for a reliable Sharpe ratio.';
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // ── Composite grade ─────────────────────────────────────────────────────
+  // ══════════════════════════════════════════════════════════════════════════
+  const subs = [
+    { name: 'Risk Alignment',        score: Math.round(riskScore),            detail: riskShort,            improvementDetail: riskLong },
+    { name: 'Goal Alignment',        score: Math.round(goalScore),            detail: goalShort,            improvementDetail: goalLong },
+    { name: 'Horizon Fit',           score: Math.round(horizonScore),         detail: horizonShort,         improvementDetail: horizonLong },
+    { name: 'Structure Match',       score: Math.round(structureScore),       detail: structureShort,       improvementDetail: structureLong },
+    { name: 'Diversification',       score: Math.round(diversificationScore), detail: diversificationShort, improvementDetail: diversificationLong },
+    { name: 'Risk-Adj. Performance', score: Math.round(perfScore),            detail: perfShort,            improvementDetail: perfLong },
+  ];
+
+  // Map numeric score → letter grade
+  subs.forEach(s => { s.grade = scoreToGrade(s.score); });
+
+  // Weighted composite
+  const weights = [0.20, 0.18, 0.15, 0.12, 0.20, 0.15];
+  const overallScore = Math.round(subs.reduce((s, sub, i) => s + sub.score * weights[i], 0));
+  const overall = scoreToGrade(overallScore);
+
+  // ── Narrative ─────────────────────────────────────────────────────────
+  const strengths = subs.filter(s => s.score >= 80).sort((a, b) => b.score - a.score);
+  // Areas to improve: B- and below (score < 80), always shown unless empty
+  const improvable = subs.filter(s => s.score < 80).sort((a, b) => a.score - b.score);
+
+  let strengthsHtml = '';
+  if (strengths.length > 0) {
+    // Use the long/detailed version for the strengths narrative (with figures),
+    // keeping the short version only in the grade sub-cards below.
+    const lines = strengths.slice(0, 3).map(s => (s.improvementDetail || s.detail).trim()).filter(Boolean);
+    strengthsHtml = `<strong>Strengths</strong><br>` + lines.map(l => `• ${l}`).join('<br>');
+  }
+
+  let improvementsHtml = '';
+  if (improvable.length > 0) {
+    const lines = improvable.slice(0, 4)
+      .map(s => {
+        const txt = (s.improvementDetail || s.detail).trim();
+        return txt ? `${s.name} (${s.grade}): ${txt}` : null;
+      })
+      .filter(Boolean);
+    if (lines.length > 0) {
+      improvementsHtml = `<strong>Areas to improve</strong><br>` + lines.map(l => `• ${l}`).join('<br>');
+    }
+  }
+
+  // ── Key metrics with survey-aware color ───────────────────────────────
+  const mc = (label, raw) => {
+    switch (label) {
+      case 'Sharpe Ratio': {
+        if (raw >= 1.2) return '#2ACA69';
+        if (raw >= 0.8) return '#8BE06A';
+        if (raw >= 0.5) return '#E8C832';
+        if (raw >= 0)   return '#F97316';
+        return '#E05252';
+      }
+      case 'Largest Holding': {
+        if (raw <= 10) return '#2ACA69';
+        if (raw <= 20) return '#8BE06A';
+        if (raw <= 30) return '#E8C832';
+        if (raw <= 50) return '#F97316';
+        return '#E05252';
+      }
+      case 'Positions': {
+        const c = answers.complexity;
+        if (c <= 3) return raw <= 6 ? '#2ACA69' : raw <= 10 ? '#E8C832' : '#F97316';
+        if (c <= 6) return raw >= 6 && raw <= 20 ? '#2ACA69' : raw >= 4 ? '#8BE06A' : '#E8C832';
+        return raw >= 12 ? '#2ACA69' : raw >= 6 ? '#8BE06A' : '#E8C832';
+      }
+      case 'Dividend Yield': {
+        const g = answers.goal;
+        if (g <= 3) return raw >= 3 ? '#2ACA69' : raw >= 1.5 ? '#8BE06A' : raw >= 0.5 ? '#E8C832' : '#E05252';
+        if (g >= 7) return '#8B9BB4'; // neutral for growth-focused
+        return raw >= 1.5 ? '#2ACA69' : raw >= 0.5 ? '#8BE06A' : '#E8C832';
+      }
+      case 'Asset Classes':
+        if (raw >= 4) return '#2ACA69';
+        if (raw >= 3) return '#8BE06A';
+        if (raw >= 2) return '#E8C832';
+        return '#F97316';
+      case 'Regions':
+        if (raw >= 5) return '#2ACA69';
+        if (raw >= 4) return '#8BE06A';
+        if (raw >= 3) return '#E8C832';
+        if (raw >= 2) return '#F97316';
+        return '#E05252';
+      case 'Trades / Month': {
+        const inv = answers.involvement;
+        if (inv <= 3) return raw <= 1 ? '#2ACA69' : raw <= 3 ? '#8BE06A' : raw <= 6 ? '#E8C832' : '#E05252';
+        if (inv >= 7) return raw >= 15 ? '#2ACA69' : raw >= 8 ? '#8BE06A' : raw >= 3 ? '#E8C832' : '#F97316';
+        return raw >= 2 && raw <= 10 ? '#2ACA69' : raw >= 1 ? '#8BE06A' : '#E8C832';
+      }
+      case 'Avg Correlation': {
+        if (raw < 0.3)  return '#2ACA69';
+        if (raw <= 0.6) return '#E8C832';
+        return '#E05252';
+      }
+      default: return '';
+    }
+  };
+
+  // Always exactly 8 metrics — 4 columns × 2 rows.
+  // Row 1: Sharpe · Positions · Largest Holding · Avg Correlation (WAC)
+  // Row 2: Dividend Yield · Asset Classes · Regions · Trades / Month
+  const wacVal = gd.insightWAC ?? null;
+  const keyMetrics = [];
+  // Row 1
+  keyMetrics.push(portfolioSharpe !== null
+    ? { label: 'Sharpe Ratio',    value: portfolioSharpe.toFixed(2),                           color: mc('Sharpe Ratio',    portfolioSharpe) }
+    : { label: 'Sharpe Ratio',    value: 'N/A',                                                 color: '#8B9BB4' });
+  keyMetrics.push({ label: 'Positions',       value: String(numPositions),                      color: mc('Positions',       numPositions) });
+  keyMetrics.push({ label: 'Largest Holding', value: topPositionPct.toFixed(0) + '%',           color: mc('Largest Holding', topPositionPct) });
+  keyMetrics.push(wacVal !== null
+    ? { label: 'Avg Correlation', value: (wacVal >= 0 ? '+' : '') + wacVal.toFixed(2),          color: mc('Avg Correlation', wacVal) }
+    : { label: 'Top-3 Weight',    value: top3Pct.toFixed(0) + '%',                              color: mc('Largest Holding', top3Pct * 0.6) });
+  // Row 2
+  keyMetrics.push({ label: 'Dividend Yield',  value: divYield.toFixed(1) + '%',                 color: mc('Dividend Yield',  divYield) });
+  keyMetrics.push({ label: 'Asset Classes',   value: String(Object.keys(assetClasses).length),  color: mc('Asset Classes',   Object.keys(assetClasses).length) });
+  keyMetrics.push({ label: 'Regions',         value: String(geoCount),                          color: mc('Regions',         geoCount) });
+  keyMetrics.push({ label: 'Trades / Month',  value: tradesPerMonth > 0 ? tradesPerMonth.toFixed(1) : '0', color: mc('Trades / Month', tradesPerMonth) });
+
+  return { overall, overallScore, subs, strengthsHtml, improvementsHtml, keyMetrics };
+}
+
+function scoreToGrade(score) {
+  if (score >= 97) return 'A+';
+  if (score >= 93) return 'A';
+  if (score >= 90) return 'A−';
+  if (score >= 87) return 'B+';
+  if (score >= 83) return 'B';
+  if (score >= 80) return 'B−';
+  if (score >= 77) return 'C+';
+  if (score >= 73) return 'C';
+  if (score >= 70) return 'C−';
+  if (score >= 67) return 'D+';
+  if (score >= 60) return 'D';
+  if (score >= 50) return 'D−';
+  return 'F';
+}
+
+function gradeColorClass(grade) {
+  const map = {
+    'A+': 'grade-a-plus', 'A': 'grade-a', 'A−': 'grade-a-minus',
+    'B+': 'grade-b-plus', 'B': 'grade-b', 'B−': 'grade-b-minus',
+    'C+': 'grade-c-plus', 'C': 'grade-c', 'C−': 'grade-c-minus',
+    'D+': 'grade-d-plus', 'D': 'grade-d', 'D−': 'grade-d-minus',
+    'F': 'grade-f',
+  };
+  return map[grade] || '';
+}
+
+function gradeBarColor(score) {
+  if (score >= 93) return '#2ACA69';
+  if (score >= 87) return '#5CD87A';
+  if (score >= 83) return '#8BE06A';
+  if (score >= 80) return '#B8E04A';
+  if (score >= 77) return '#D4D63A';
+  if (score >= 73) return '#E8C832';
+  if (score >= 67) return '#FFB82E';
+  if (score >= 60) return '#F9972A';
+  if (score >= 50) return '#F97316';
+  return '#E05252';
+}
+
+// ── Grade metric navigation helper ─────────────────────────────────────────
+// Scrolls to the relevant dashboard section and, where needed, opens a
+// collapsed panel or activates a toggle before scrolling.
+function navigateToSection(label) {
+  const scrollTo = (el, offset = 80) => {
+    if (!el) return;
+    const y = el.getBoundingClientRect().top + window.scrollY - offset;
+    window.scrollTo({ top: y, behavior: 'smooth' });
+  };
+
+  switch (label) {
+    case 'Sharpe Ratio': {
+      // Capital Appreciation chart — ensure insight bar is open
+      const insightBtn = document.getElementById('insightToggle');
+      const insightEl  = document.getElementById('chartInsight');
+      if (insightBtn && insightEl && !insightBtn.classList.contains('active')) {
+        insightBtn.classList.add('active');
+        globalData.showInsight = true;
+        insightEl.style.display = '';
+      }
+      scrollTo(document.getElementById('performanceChart')?.closest('.card'));
+      break;
+    }
+
+    case 'Trades / Month': {
+      // Capital Appreciation chart — turn on trades overlay if not already on
+      const tradesBtn = document.getElementById('tradesToggle');
+      if (tradesBtn && !tradesBtn.classList.contains('active')) {
+        tradesBtn.classList.add('active');
+        globalData.showTrades = true;
+        const activeMode = document.querySelector('#perfToggle .toggle-btn.active')?.dataset.mode || 'pct';
+        drawPerformanceChart(globalData.portfolioSeries, globalData.spyData, activeMode, globalData.eurSeries);
+      }
+      scrollTo(document.getElementById('performanceChart')?.closest('.card'));
+      break;
+    }
+
+    case 'Positions':
+    case 'Asset Classes':
+    case 'Regions': {
+      // Allocation pie chart (right card in grid-top)
+      scrollTo(document.getElementById('allocationChart')?.closest('.card'));
+      break;
+    }
+
+    case 'Largest Holding':
+    case 'Top-3 Weight':
+    case 'Avg Correlation': {
+      // Correlation matrix — open it if collapsed (Pro only; non-Pro shows overlay)
+      const corrBtn     = document.getElementById('btnCorrelation');
+      const corrContent = document.getElementById('correlationContent');
+      if (corrBtn && corrContent && corrContent.style.display === 'none') {
+        corrBtn.click();
+      }
+      scrollTo(document.getElementById('correlationCard'));
+      break;
+    }
+
+    case 'Dividend Yield': {
+      // Switch to Insights tab and scroll to More Insights card
+      const insightsBtn = document.querySelector('.tab-btn[data-tab="insights"]');
+      if (insightsBtn) insightsBtn.click();
+      scrollTo(document.getElementById('moreInfoCard'));
+      break;
+    }
+
+    default:
+      break;
+  }
+}
+
+function renderGradeResults(gradeData, container) {
+  container.innerHTML = '';
+  container.dataset.rendered = '1';
+
+  // ── Top row: Grade letter + narrative (left) | Key metrics (right) ──
+  const topRow = document.createElement('div');
+  topRow.className = 'grade-top-row';
+
+  // Left column: grade letter + text column side by side
+  const leftCol = document.createElement('div');
+  leftCol.className = 'grade-left-col';
+
+  const letterRow = document.createElement('div');
+  letterRow.className = 'grade-letter-row';
+
+  // Big grade letter
+  const letterWrap = document.createElement('div');
+  letterWrap.className = 'grade-letter-wrap';
+  const letter = document.createElement('div');
+  letter.className = 'grade-letter ' + gradeColorClass(gradeData.overall);
+  letter.textContent = gradeData.overall;
+  const letterLabel = document.createElement('div');
+  letterLabel.className = 'grade-letter-label';
+  letterLabel.textContent = 'Overall Grade';
+  letterWrap.append(letter, letterLabel);
+
+  // Text column: strengths + improvements at the same indent
+  const textCol = document.createElement('div');
+  textCol.className = 'grade-text-col';
+
+  if (gradeData.strengthsHtml) {
+    const strengthsWrap = document.createElement('div');
+    strengthsWrap.className = 'grade-narrative-section';
+    strengthsWrap.innerHTML = gradeData.strengthsHtml;
+    textCol.appendChild(strengthsWrap);
+  }
+
+  if (gradeData.improvementsHtml) {
+    const improvWrap = document.createElement('div');
+    improvWrap.className = 'grade-narrative-section grade-improvements';
+    improvWrap.innerHTML = gradeData.improvementsHtml;
+    textCol.appendChild(improvWrap);
+  }
+
+  letterRow.append(letterWrap, textCol);
+  leftCol.appendChild(letterRow);
+
+  // Right column: key metrics in 3 columns
+  const rightCol = document.createElement('div');
+  rightCol.className = 'grade-metrics-col';
+
+  gradeData.keyMetrics.forEach(m => {
+    const box = document.createElement('div');
+    box.className = 'grade-metric-box';
+    const val = document.createElement('div');
+    val.className = 'grade-metric-value';
+    val.style.color = m.color || 'var(--text)';
+    val.textContent = m.value;
+    const lbl = document.createElement('div');
+    lbl.className = 'grade-metric-label';
+    lbl.textContent = m.label;
+
+    box.append(val, lbl);
+    rightCol.appendChild(box);
+  });
+
+  // ── Analysis section (narratives, metrics, sub-grades) ──
+  const analysisWrap = document.createElement('div');
+  analysisWrap.className = 'grade-analysis-wrap';
+
+  topRow.append(leftCol, rightCol);
+  analysisWrap.appendChild(topRow);
+
+  // ── Sub-grades grid ──
+  const subsGrid = document.createElement('div');
+  subsGrid.className = 'grade-subs';
+
+  gradeData.subs.forEach(sub => {
+    const card = document.createElement('div');
+    card.className = 'grade-sub';
+
+    const nameEl = document.createElement('div');
+    nameEl.className = 'grade-sub-name';
+    nameEl.textContent = sub.name;
+
+    const letterEl = document.createElement('div');
+    letterEl.className = 'grade-sub-letter ' + gradeColorClass(sub.grade);
+    letterEl.textContent = sub.grade;
+
+    const bar = document.createElement('div');
+    bar.className = 'grade-sub-bar';
+    const barInner = document.createElement('div');
+    barInner.className = 'grade-sub-bar-inner';
+    barInner.style.width = (sub.grade === 'A+' ? 100 : sub.score) + '%';
+    barInner.style.background = gradeBarColor(sub.score);
+    bar.appendChild(barInner);
+
+    const detail = document.createElement('div');
+    detail.className = 'grade-sub-detail';
+    detail.textContent = sub.detail;
+
+    card.append(nameEl, letterEl, bar, detail);
+    subsGrid.appendChild(card);
+  });
+
+  analysisWrap.appendChild(subsGrid);
+
+  // ── Free users: show grade letter + teaser, blur the analysis ──
+  if (!proUnlocked) {
+    // Grade letter reveal (above the blurred section)
+    const revealWrap = document.createElement('div');
+    revealWrap.className = 'grade-reveal';
+
+    const revealLetter = document.createElement('div');
+    revealLetter.className = 'grade-letter ' + gradeColorClass(gradeData.overall);
+    revealLetter.textContent = gradeData.overall;
+    const revealLabel = document.createElement('div');
+    revealLabel.className = 'grade-letter-label';
+    revealLabel.textContent = 'Your Portfolio Grade';
+
+    // Dynamic teaser — specific enough to be compelling, vague enough to require upgrade
+    const sortedSubs = [...gradeData.subs].sort((a, b) => a.score - b.score);
+    const weakest = sortedSubs[0];
+    const strongest = sortedSubs[sortedSubs.length - 1];
+    const weakCount = sortedSubs.filter(s => s.score < 50).length;
+    const strongCount = sortedSubs.filter(s => s.score >= 70).length;
+
+    let teaser = '';
+    if (strongCount > 0 && weakCount > 0) {
+      teaser = `Your portfolio scores well in ${strongCount} area${strongCount > 1 ? 's' : ''} but has ${weakCount} critical weakness${weakCount > 1 ? 'es' : ''} holding back your grade.`;
+    } else if (weakCount > 0) {
+      teaser = `We found ${weakCount} area${weakCount > 1 ? 's' : ''} where your portfolio falls short — unlock the full analysis to see what to fix.`;
+    } else if (strongCount === sortedSubs.length) {
+      teaser = `Your portfolio is strong across all dimensions — see the detailed breakdown to find out exactly where you excel.`;
+    } else {
+      teaser = `Your portfolio has room to improve in ${sortedSubs.length - strongCount} areas — unlock the full analysis for personalised recommendations.`;
+    }
+
+    // Add a hint about the weakest area without naming the specific metric
+    if (weakest.score < 40 && strongest.score >= 60) {
+      teaser += ` Your weakest dimension scored ${weakest.score}/100.`;
+    }
+
+    const teaserEl = document.createElement('div');
+    teaserEl.className = 'grade-teaser';
+    teaserEl.textContent = teaser;
+
+    revealWrap.append(revealLetter, revealLabel, teaserEl);
+    container.appendChild(revealWrap);
+
+    // Blurred analysis with Pro overlay
+    const gateWrap = document.createElement('div');
+    gateWrap.className = 'grade-gate-wrap';
+    gateWrap.style.position = 'relative';
+
+    analysisWrap.classList.add('corr-blur-wrap');
+    gateWrap.appendChild(analysisWrap);
+    container.appendChild(gateWrap);
+    showProOverlay(gateWrap, 'Full Analysis');
+
+    // Retake button
+    const retake = document.createElement('button');
+    retake.className = 'grade-retake';
+    retake.textContent = '↻ Retake survey';
+    retake.addEventListener('click', () => {
+      container.style.display = 'none';
+      document.getElementById('gradeSurvey').style.display = 'block';
+    });
+    container.appendChild(retake);
+    return;
+  }
+
+  container.appendChild(analysisWrap);
+
+  // Retake button
+  const retake = document.createElement('button');
+  retake.className = 'grade-retake';
+  retake.textContent = '↻ Retake survey';
+  retake.addEventListener('click', () => {
+    container.style.display = 'none';
+    document.getElementById('gradeSurvey').style.display = 'block';
+  });
+  container.appendChild(retake);
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██  STRESS TEST SCENARIO ANALYSIS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ── Scenario definitions ─────────────────────────────────────────────────────
+// Each scenario defines factor shocks keyed by "AssetClass:Geography".
+// Lookup priority: exact match → AssetClass:* wildcard → benchmark fallback.
+// Shocks are in percent (−30 = a 30% drop).
+//
+// Historical shocks sourced from index drawdowns during each event window.
+// Hypothetical shocks modelled from analogous historical events, sector
+// concentration studies, and geopolitical risk research.
+
+const STRESS_SCENARIOS = [
+  // ── Historical ────────────────────────────────────────────────────────────
+  {
+    id: 'covid_2020',
+    name: 'COVID-19 Crash',
+    type: 'historical',
+    period: 'Feb 19 – Mar 23, 2020',
+    startDate: '2020-02-19',
+    endDate: '2020-03-23',
+    description: 'Global pandemic triggers the fastest bear market in history. Broad-based liquidation across equities and commodities. Flight to government bonds.',
+    shocks: {
+      'Equity:USA': -34, 'Equity:Europe': -38, 'Equity:UK': -34,
+      'Equity:Japan': -29, 'Equity:China': -15, 'Equity:Asia-Pacific': -28,
+      'Equity:Emerging': -31, 'Equity:India': -38, 'Equity:Latin America': -46,
+      'Equity:Global': -34, 'Equity:Canada': -34, 'Equity:Switzerland': -25,
+      'Equity:Australia': -36, 'Equity:Other': -32,
+      'Bonds:*': +1, 'Commodities:*': -25, 'Real Estate:*': -42,
+      'Money Market:*': 0, 'Derivatives:*': -50,
+    },
+    benchmark: -34,
+  },
+  {
+    id: 'rate_hike_2022',
+    name: '2022 Rate Hike Cycle',
+    type: 'historical',
+    period: 'Jan 3 – Oct 12, 2022',
+    startDate: '2022-01-03',
+    endDate: '2022-10-12',
+    description: 'Aggressive central bank tightening crushes both stocks and bonds simultaneously — the worst year for a 60/40 portfolio in modern history.',
+    shocks: {
+      'Equity:USA': -25, 'Equity:Europe': -22, 'Equity:UK': -8,
+      'Equity:Japan': -11, 'Equity:China': -32, 'Equity:Asia-Pacific': -22,
+      'Equity:Emerging': -28, 'Equity:India': -10, 'Equity:Latin America': -5,
+      'Equity:Global': -26, 'Equity:Canada': -16, 'Equity:Switzerland': -20,
+      'Equity:Australia': -12, 'Equity:Other': -20,
+      'Bonds:*': -18, 'Commodities:*': +8, 'Real Estate:*': -32,
+      'Money Market:*': +0.5, 'Derivatives:*': -30,
+    },
+    benchmark: -25,
+  },
+  {
+    id: 'liberation_day_2025',
+    name: 'Liberation Day Tariffs',
+    type: 'historical',
+    period: 'Apr 2 – Apr 9, 2025',
+    startDate: '2025-04-02',
+    endDate: '2025-04-09',
+    description: 'Sweeping US tariff announcements trigger a sharp global sell-off. Trade-dependent sectors and Asian exporters hit hardest. Bonds rally on recession fears.',
+    shocks: {
+      'Equity:USA': -12, 'Equity:Europe': -14, 'Equity:UK': -10,
+      'Equity:Japan': -9, 'Equity:China': -8, 'Equity:Asia-Pacific': -11,
+      'Equity:Emerging': -13, 'Equity:India': -6, 'Equity:Latin America': -10,
+      'Equity:Global': -12, 'Equity:Canada': -12, 'Equity:Switzerland': -8,
+      'Equity:Australia': -10, 'Equity:Other': -11,
+      'Bonds:*': +2, 'Commodities:*': -8, 'Real Estate:*': -10,
+      'Money Market:*': 0, 'Derivatives:*': -18,
+    },
+    benchmark: -12,
+  },
+
+  // ── Hypothetical ──────────────────────────────────────────────────────────
+  {
+    id: 'ai_bubble',
+    name: 'AI Bubble Burst',
+    type: 'hypothetical',
+    period: null,
+    startDate: null,
+    endDate: null,
+    description: 'A dot-com style collapse in AI valuations. Tech mega-caps fall 50%+, dragging down indices with heavy tech weightings. Money rotates into bonds, gold, and value stocks.',
+    shocks: {
+      'Equity:USA': -35, 'Equity:Europe': -20, 'Equity:UK': -15,
+      'Equity:Japan': -25, 'Equity:China': -18, 'Equity:Asia-Pacific': -22,
+      'Equity:Emerging': -18, 'Equity:India': -15, 'Equity:Latin America': -14,
+      'Equity:Global': -30, 'Equity:Canada': -22, 'Equity:Switzerland': -16,
+      'Equity:Australia': -14, 'Equity:Other': -18,
+      'Bonds:*': +5, 'Commodities:*': -10, 'Real Estate:*': -15,
+      'Money Market:*': +0.5, 'Derivatives:*': -55,
+    },
+    // Sector multipliers on base geographic shock — AI crash punishes tech, spares defensives
+    sectorOverrides: {
+      'Technology': 1.6,        // tech is ground zero
+      'Utilities': 0.25,        // defensive, dividend-paying — money rotates IN
+      'Healthcare': 0.35,       // defensive, non-cyclical
+      'Consumer Staples': 0.3,  // essential spending, safe haven rotation
+      'Defence': 0.5,           // less correlated, government spending stable
+      'Financials': 0.7,        // moderate — bank exposure to tech loans
+      'Energy': 0.5,            // traditional energy largely unaffected
+    },
+    benchmark: -35,
+  },
+  {
+    id: 'taiwan_invasion',
+    name: 'Chinese Invasion of Taiwan',
+    type: 'hypothetical',
+    period: null,
+    startDate: null,
+    endDate: null,
+    description: 'A military conflict disrupts the global semiconductor supply chain. Asian markets collapse, energy prices spike, and Western sanctions trigger broad economic uncertainty.',
+    shocks: {
+      'Equity:USA': -28, 'Equity:Europe': -22, 'Equity:UK': -18,
+      'Equity:Japan': -35, 'Equity:China': -50, 'Equity:Asia-Pacific': -40,
+      'Equity:Emerging': -32, 'Equity:India': -20, 'Equity:Latin America': -18,
+      'Equity:Global': -30, 'Equity:Canada': -18, 'Equity:Switzerland': -14,
+      'Equity:Australia': -25, 'Equity:Other': -25,
+      'Bonds:*': +8, 'Commodities:*': +20, 'Real Estate:*': -18,
+      'Money Market:*': +1, 'Derivatives:*': -45,
+    },
+    // Semiconductor supply chain devastation hits tech; defence benefits from war spending
+    sectorOverrides: {
+      'Technology': 1.5,        // semiconductor shortage cascades through supply chains
+      'Defence': -0.5,          // negative = they GAIN (defence stocks rally on conflict)
+      'Energy': 0.4,            // traditional energy benefits from commodity spike
+      'Utilities': 0.6,         // domestic, regulated — relatively insulated
+      'Healthcare': 0.6,        // non-cyclical, some upside from defensive rotation
+      'Consumer Staples': 0.65, // essential spending but supply chain disruption
+      'Financials': 1.1,        // sanctions exposure, trade finance disruption
+    },
+    benchmark: -28,
+  },
+  {
+    id: 'eu_debt_crisis',
+    name: 'European Sovereign Debt Crisis 2.0',
+    type: 'hypothetical',
+    period: null,
+    startDate: null,
+    endDate: null,
+    description: 'A major EU member triggers a sovereign debt scare. European bonds and equities sell off together, the euro weakens, and contagion spreads to global banks. Modelled on the 2011–12 crisis at greater severity.',
+    shocks: {
+      'Equity:USA': -15, 'Equity:Europe': -38, 'Equity:UK': -14,
+      'Equity:Japan': -10, 'Equity:China': -10, 'Equity:Asia-Pacific': -12,
+      'Equity:Emerging': -18, 'Equity:India': -12, 'Equity:Latin America': -16,
+      'Equity:Global': -22, 'Equity:Canada': -12, 'Equity:Switzerland': -10,
+      'Equity:Australia': -10, 'Equity:Other': -15,
+      'Bonds:*': -20, 'Commodities:*': -8, 'Real Estate:*': -30,
+      'Money Market:*': -2, 'Derivatives:*': -35,
+    },
+    // Sovereign contagion hammers financials; defensives fare comparatively better
+    sectorOverrides: {
+      'Financials': 1.5,        // banks are the transmission mechanism of sovereign contagion
+      'Utilities': 0.7,         // regulated, but government funding risk rises
+      'Healthcare': 0.6,        // non-cyclical, less exposed to sovereign risk
+      'Consumer Staples': 0.65, // essential, but euro weakness hits margins
+      'Technology': 0.8,        // less affected than broad market, global revenue
+      'Defence': 0.75,          // government spending at risk in austerity
+      'Energy': 0.7,            // global commodity pricing offsets local weakness
+    },
+    benchmark: -22,
+  },
+];
+
+// ── Estimation engine ────────────────────────────────────────────────────────
+
+/**
+ * Estimate a single position's shock under a scenario.
+ * Path 1: If 5Y price history covers the scenario window, use actual returns.
+ * Path 2: Otherwise, estimate from asset class × geography factor shocks.
+ * Returns { shock (%), source ('actual'|'estimated') }
+ */
+function estimatePositionShock(position, scenario, priceHistories) {
+  // Path 1: try actual historical data
+  if (scenario.startDate && scenario.endDate && priceHistories) {
+    const history = priceHistories[position.id];
+    if (history && history.length > 10) {
+      // Binary search for closest price on or before a date
+      const findPrice = (targetDate) => {
+        let lo = 0, hi = history.length - 1, best = null;
+        while (lo <= hi) {
+          const mid = (lo + hi) >> 1;
+          if (history[mid].date <= targetDate) { best = history[mid].price; lo = mid + 1; }
+          else hi = mid - 1;
+        }
+        return best;
+      };
+      const startPrice = findPrice(scenario.startDate);
+      const endPrice = findPrice(scenario.endDate);
+      if (startPrice && endPrice && startPrice > 0) {
+        return { shock: ((endPrice - startPrice) / startPrice) * 100, source: 'actual' };
+      }
+    }
+  }
+
+  // Path 2: factor-based estimation
+  const assetClass = inferAssetClass(position);
+  const geo = inferGeo(position);
+
+  // Try exact key, then wildcard, then benchmark
+  const shocks = scenario.shocks;
+  let shock = shocks[`${assetClass}:${geo}`]
+    ?? shocks[`${assetClass}:*`]
+    ?? shocks[`Equity:${geo}`]  // fallback: use equity shock for that region
+    ?? scenario.benchmark;
+
+  // Apply sector-level override for equities (e.g. utilities vs tech in AI crash)
+  // Multiplier scales the base shock: 0.25 = 25% of impact (defensive), 1.5 = 150% (exposed)
+  // Negative multiplier flips sign: -0.5 on a -22% shock → +11% gain (e.g. defence in conflict)
+  if (assetClass === 'Equity' && scenario.sectorOverrides) {
+    const sector = inferSector(position);
+    if (sector && scenario.sectorOverrides[sector] !== undefined) {
+      shock = shock * scenario.sectorOverrides[sector];
+    }
+  }
+
+  return { shock: Math.round(shock * 10) / 10, source: 'estimated' };
+}
+
+/**
+ * Compute the full portfolio impact for a single scenario.
+ * Returns { portfolioShock, eurLoss, positionImpacts[], worstPositions[], bestPositions[] }
+ */
+function computeStressTest(positions, scenario, priceHistories) {
+  const totalValue = positions.reduce((s, p) => s + p.value, 0);
+  if (totalValue === 0) return null;
+
+  let portfolioShock = 0;
+  const positionImpacts = [];
+
+  for (const p of positions) {
+    const weight = p.value / totalValue;
+    const { shock, source } = estimatePositionShock(p, scenario, priceHistories);
+    const eurImpact = p.value * (shock / 100);
+
+    portfolioShock += weight * shock;
+    positionImpacts.push({
+      id: p.id,
+      name: p.name || 'ID ' + p.id,
+      weight,
+      shock: Math.round(shock * 10) / 10,
+      eurImpact: Math.round(eurImpact),
+      value: p.value,
+      source,
+      assetClass: inferAssetClass(p),
+      geo: inferGeo(p),
+    });
+  }
+
+  positionImpacts.sort((a, b) => a.shock - b.shock);
+
+  return {
+    scenario,
+    portfolioShock: Math.round(portfolioShock * 10) / 10,
+    eurLoss: Math.round(totalValue * (portfolioShock / 100)),
+    totalValue,
+    positionImpacts,
+    worstPositions: positionImpacts.slice(0, 5),
+    bestPositions: [...positionImpacts].sort((a, b) => b.shock - a.shock).slice(0, 3),
+    actualCount: positionImpacts.filter(p => p.source === 'actual').length,
+    totalCount: positionImpacts.length,
+  };
+}
+
+// ── Mitigation generator ─────────────────────────────────────────────────────
+
+function generateMitigations(impact, positions) {
+  const suggestions = [];
+  const totalValue = impact.totalValue;
+  const scenario = impact.scenario;
+  const posImpacts = impact.positionImpacts;
+
+  // Precompute portfolio breakdown
+  const geoExposure = {};
+  const assetExposure = {};
+  posImpacts.forEach(p => {
+    geoExposure[p.geo] = (geoExposure[p.geo] || 0) + p.value;
+    assetExposure[p.assetClass] = (assetExposure[p.assetClass] || 0) + p.value;
+  });
+  const geoEntries = Object.entries(geoExposure).sort((a, b) => b[1] - a[1]);
+  const equityPct = ((assetExposure['Equity'] || 0) / totalValue) * 100;
+  const bondsPct = ((assetExposure['Bonds'] || 0) / totalValue) * 100;
+  const mmPct = ((assetExposure['Money Market'] || 0) / totalValue) * 100;
+  const defensivePct = bondsPct + mmPct;
+  const commodityPct = ((assetExposure['Commodities'] || 0) / totalValue) * 100;
+  const rePct = ((assetExposure['Real Estate'] || 0) / totalValue) * 100;
+  const totalLoss = Math.abs(impact.eurLoss);
+
+  // 1. Concentration risk: top contributor > 25% of total loss
+  if (impact.worstPositions.length > 0 && totalLoss > 0) {
+    const worstLoss = Math.abs(impact.worstPositions[0].eurImpact);
+    const worstPct = (worstLoss / totalLoss) * 100;
+    if (worstPct > 25) {
+      suggestions.push({
+        sentiment: 'negative',
+        text: `${impact.worstPositions[0].name} alone accounts for ${worstPct.toFixed(0)}% of the projected loss (${fmtEur(impact.worstPositions[0].eurImpact)}). Reducing this position or hedging with a less correlated asset would lower your exposure to this scenario.`,
+      });
+    }
+  }
+
+  // 2. Geographic concentration
+  if (geoEntries.length > 0) {
+    const topGeo = geoEntries[0];
+    const topGeoPct = (topGeo[1] / totalValue) * 100;
+    const topGeoShock = scenario.shocks[`Equity:${topGeo[0]}`] ?? scenario.benchmark;
+    if (topGeoPct > 60 && topGeoShock < -15) {
+      const lessHitGeos = geoEntries
+        .filter(([geo]) => (scenario.shocks[`Equity:${geo}`] ?? scenario.benchmark) > topGeoShock + 10)
+        .map(([geo]) => geo);
+      const diversifyTo = lessHitGeos.length > 0
+        ? ` Regions like ${lessHitGeos.slice(0, 2).join(' and ')} would be less affected.`
+        : '';
+      suggestions.push({
+        sentiment: 'negative',
+        text: `${topGeoPct.toFixed(0)}% of your portfolio is concentrated in ${topGeo[0]}, which drops ${topGeoShock}% in this scenario. Diversifying geographically would significantly reduce impact.${diversifyTo}`,
+      });
+    }
+  }
+
+  // ── Scenario-specific insights ───────────────────────────────────────────
+
+  if (scenario.id === 'covid_2020') {
+    // COVID: bonds rally, cash is king, V-shaped recovery potential
+    const bondShock = scenario.shocks['Bonds:*'] ?? 0;
+    if (defensivePct < 10) {
+      suggestions.push({
+        sentiment: 'negative',
+        text: `Only ${defensivePct.toFixed(0)}% of your portfolio is in defensive assets. During COVID, government bonds gained ${bondShock > 0 ? '+' : ''}${bondShock}% while equities fell 34%. A 15–20% bond allocation would cushion pandemic-style shocks.`,
+      });
+    } else if (defensivePct >= 10) {
+      suggestions.push({
+        sentiment: 'positive',
+        text: `Your ${defensivePct.toFixed(0)}% allocation to defensive assets helps here — bonds rallied ${bondShock > 0 ? '+' : ''}${bondShock}% during the COVID crash as a flight-to-safety trade.`,
+      });
+    }
+    // Real estate warning
+    if (rePct > 5) {
+      suggestions.push({
+        sentiment: 'negative',
+        text: `Your ${rePct.toFixed(0)}% real estate exposure faces a –42% shock in this scenario. Lockdowns and commercial vacancy fears hit REITs especially hard during the pandemic.`,
+      });
+    }
+    // Recovery note — broad equity exposure is actually good for the rebound
+    if (equityPct > 70) {
+      suggestions.push({
+        sentiment: 'positive',
+        text: `While equity-heavy portfolios suffer the initial drawdown, the COVID recovery was V-shaped — the S&P 500 recovered its losses within 5 months. High equity exposure means you would also benefit most from the rebound.`,
+      });
+    }
+  }
+
+  if (scenario.id === 'rate_hike_2022') {
+    // Unique: bonds and equities fall together, commodities gain, duration matters
+    if (bondsPct > 10) {
+      suggestions.push({
+        sentiment: 'negative',
+        text: `The 2022 rate hike uniquely hit both stocks and bonds (bonds dropped ${scenario.shocks['Bonds:*']}%). Your ${bondsPct.toFixed(0)}% bond allocation would not protect you here. Short-duration bonds or floating-rate instruments are better hedges against rate hikes.`,
+      });
+    }
+    if (commodityPct > 3) {
+      suggestions.push({
+        sentiment: 'positive',
+        text: `Your ${commodityPct.toFixed(0)}% commodity exposure is a bright spot — commodities gained ${scenario.shocks['Commodities:*'] > 0 ? '+' : ''}${scenario.shocks['Commodities:*']}% during 2022's rate cycle as inflation-linked assets benefited.`,
+      });
+    } else {
+      suggestions.push({
+        sentiment: 'negative',
+        text: `Commodity exposure is only ${commodityPct.toFixed(0)}%. Commodities gained +8% during the 2022 rate hike as inflation-linked assets outperformed. A small allocation to commodity ETFs could act as an inflation hedge.`,
+      });
+    }
+    // UK/LatAm held up relatively well
+    const ukPct = ((geoExposure['UK'] || 0) / totalValue) * 100;
+    const latamPct = ((geoExposure['Latin America'] || 0) / totalValue) * 100;
+    if (ukPct > 5 || latamPct > 3) {
+      const resilient = [];
+      if (ukPct > 5) resilient.push(`UK (–8%)`);
+      if (latamPct > 3) resilient.push(`Latin America (–5%)`);
+      suggestions.push({
+        sentiment: 'positive',
+        text: `Your exposure to ${resilient.join(' and ')} is beneficial — these value-tilted markets held up relatively well during the rate hike cycle compared to growth-heavy indices.`,
+      });
+    }
+  }
+
+  if (scenario.id === 'liberation_day_2025') {
+    // Short, sharp shock. Trade-dependent sectors hit hardest. Bonds rally.
+    const europePct = ((geoExposure['Europe'] || 0) / totalValue) * 100;
+    if (europePct > 40) {
+      suggestions.push({
+        sentiment: 'negative',
+        text: `${europePct.toFixed(0)}% of your portfolio is in European equities, which drop –14% in this scenario as trade-dependent exporters are hit by tariff uncertainty. Sectors with high US revenue exposure would be especially affected.`,
+      });
+    }
+    const bondShock = scenario.shocks['Bonds:*'] ?? 0;
+    if (defensivePct >= 10) {
+      suggestions.push({
+        sentiment: 'positive',
+        text: `Your ${defensivePct.toFixed(0)}% in defensive assets provides a buffer — bonds rally ${bondShock > 0 ? '+' : ''}${bondShock}% on recession fears following tariff escalation.`,
+      });
+    } else {
+      suggestions.push({
+        sentiment: 'negative',
+        text: `Only ${defensivePct.toFixed(0)}% in defensive assets. Bonds gained +2% during the Liberation Day sell-off as markets priced in recession. Some bond exposure would soften this type of short, sharp shock.`,
+      });
+    }
+    // Swiss/India resilience
+    const chPct = ((geoExposure['Switzerland'] || 0) / totalValue) * 100;
+    const inPct = ((geoExposure['India'] || 0) / totalValue) * 100;
+    if (chPct > 3 || inPct > 3) {
+      const resilient = [];
+      if (chPct > 3) resilient.push(`Switzerland (–8%)`);
+      if (inPct > 3) resilient.push(`India (–6%)`);
+      suggestions.push({
+        sentiment: 'positive',
+        text: `Your exposure to ${resilient.join(' and ')} helps — these domestically-oriented markets are less affected by US trade policy shocks.`,
+      });
+    }
+  }
+
+  if (scenario.id === 'ai_bubble') {
+    // Tech-heavy portfolios are most exposed. Value rotation benefits non-US.
+    const usGlobalPositions = posImpacts.filter(p =>
+      p.assetClass === 'Equity' && (p.geo === 'USA' || p.geo === 'Global')
+    );
+    const techWeight = usGlobalPositions.reduce((s, p) => s + p.weight, 0) * 100;
+    if (techWeight > 40) {
+      suggestions.push({
+        sentiment: 'negative',
+        text: `${techWeight.toFixed(0)}% of your portfolio is in US/Global equities — ground zero for an AI valuation correction. US indices with heavy tech weighting (S&P 500 is ~35% tech) would drop significantly. Consider whether this exposure reflects conviction or index drift.`,
+      });
+    }
+    const europePct = ((geoExposure['Europe'] || 0) / totalValue) * 100;
+    const ukPct = ((geoExposure['UK'] || 0) / totalValue) * 100;
+    if (europePct > 15 || ukPct > 10) {
+      suggestions.push({
+        sentiment: 'positive',
+        text: `Your European${ukPct > 10 ? ' and UK' : ''} equity exposure would be relatively resilient — these markets have lower tech concentration and would benefit from a rotation into value stocks. Europe drops only –20% vs –35% for the US in this scenario.`,
+      });
+    }
+    const bondShock = scenario.shocks['Bonds:*'] ?? 0;
+    if (defensivePct >= 10) {
+      suggestions.push({
+        sentiment: 'positive',
+        text: `Your ${defensivePct.toFixed(0)}% defensive allocation helps — bonds rally ${bondShock > 0 ? '+' : ''}${bondShock}% as capital flees overvalued tech into safe havens.`,
+      });
+    }
+  }
+
+  if (scenario.id === 'taiwan_invasion') {
+    // Geopolitical: Asia devastated, commodities spike, semiconductor disruption
+    // China-specific: –50% is the single worst shock in any scenario
+    const chinaPct = ((geoExposure['China'] || 0) / totalValue) * 100;
+    const chinaShock = scenario.shocks['Equity:China'] ?? -50;
+    const chinaPositions = posImpacts.filter(p => p.geo === 'China');
+    if (chinaPositions.length > 0) {
+      const chinaNames = chinaPositions.map(p => p.name).slice(0, 3).join(', ');
+      const chinaLoss = chinaPositions.reduce((s, p) => s + (p.value * chinaShock / 100), 0);
+      suggestions.push({
+        sentiment: 'negative',
+        text: `Your Chinese holdings (${chinaNames}) face the most severe shock in this scenario at ${chinaShock}%. ${chinaPct.toFixed(1)}% of your portfolio is in China, projecting a loss of ${fmtEur(chinaLoss)} from these positions alone. China would be the direct conflict zone with potential capital controls and exchange closures.`,
+      });
+    }
+    // Broader Asia (excluding China, already covered)
+    const otherAsiaPositions = posImpacts.filter(p =>
+      ['Japan', 'Asia-Pacific', 'Emerging'].includes(p.geo)
+    );
+    const otherAsiaWeight = otherAsiaPositions.reduce((s, p) => s + p.weight, 0) * 100;
+    if (otherAsiaWeight > 10) {
+      const regionBreakdown = [];
+      const japanPct = ((geoExposure['Japan'] || 0) / totalValue) * 100;
+      const apacPct = ((geoExposure['Asia-Pacific'] || 0) / totalValue) * 100;
+      const emPct = ((geoExposure['Emerging'] || 0) / totalValue) * 100;
+      if (japanPct > 3) regionBreakdown.push(`Japan ${japanPct.toFixed(0)}% (–35%)`);
+      if (apacPct > 3) regionBreakdown.push(`Asia-Pacific ${apacPct.toFixed(0)}% (–40%)`);
+      if (emPct > 3) regionBreakdown.push(`Emerging markets ${emPct.toFixed(0)}% (–32%)`);
+      suggestions.push({
+        sentiment: 'negative',
+        text: `Beyond China, ${otherAsiaWeight.toFixed(0)}% of your portfolio is in other affected Asian regions: ${regionBreakdown.join(', ')}. Semiconductor supply chain disruptions would cascade across the region.`,
+      });
+    }
+    const totalAsiaWeight = chinaPct + otherAsiaWeight;
+    if (totalAsiaWeight < 5 && chinaPositions.length === 0) {
+      suggestions.push({
+        sentiment: 'positive',
+        text: `Low Asian exposure (${totalAsiaWeight.toFixed(0)}%) means you avoid the worst of this scenario's direct impact. The heaviest losses fall on China (–50%), Asia-Pacific (–40%), and Japan (–35%).`,
+      });
+    }
+    if (commodityPct > 3) {
+      suggestions.push({
+        sentiment: 'positive',
+        text: `Your ${commodityPct.toFixed(0)}% commodity allocation would surge +20% in this scenario — energy prices spike on supply disruption and geopolitical risk premium, partially offsetting equity losses.`,
+      });
+    } else {
+      suggestions.push({
+        sentiment: 'negative',
+        text: `Commodity exposure is only ${commodityPct.toFixed(0)}%. In a geopolitical conflict, energy and metals prices spike sharply (+20% modelled). A small commodity or gold allocation acts as a natural geopolitical hedge.`,
+      });
+    }
+    const bondShock = scenario.shocks['Bonds:*'] ?? 0;
+    if (bondsPct > 5) {
+      suggestions.push({
+        sentiment: 'positive',
+        text: `Bonds rally ${bondShock > 0 ? '+' : ''}${bondShock}% in this scenario as investors flee to government debt. Your ${bondsPct.toFixed(0)}% bond allocation provides meaningful protection.`,
+      });
+    }
+  }
+
+  if (scenario.id === 'eu_debt_crisis') {
+    // European sovereign contagion: bonds AND equities fall in Europe
+    const europePct = ((geoExposure['Europe'] || 0) / totalValue) * 100;
+    if (europePct > 50) {
+      suggestions.push({
+        sentiment: 'negative',
+        text: `${europePct.toFixed(0)}% of your portfolio is in European assets, the epicentre of this crisis (–38%). Diversifying toward non-EU markets (US, Asia) would reduce your exposure to sovereign contagion.`,
+      });
+    }
+    if (bondsPct > 10) {
+      suggestions.push({
+        sentiment: 'negative',
+        text: `Unlike a typical crisis, European bonds would fall alongside equities (${scenario.shocks['Bonds:*']}%). Your ${bondsPct.toFixed(0)}% bond allocation would not provide its usual safe-haven protection — in a sovereign debt scare, government bonds are the problem, not the solution.`,
+      });
+    }
+    if (rePct > 5) {
+      suggestions.push({
+        sentiment: 'negative',
+        text: `Real estate (${rePct.toFixed(0)}% of portfolio) faces a –30% shock in this scenario. European REITs and property funds are directly exposed to sovereign credit risk through bank lending channels.`,
+      });
+    }
+    const usPct = ((geoExposure['USA'] || 0) / totalValue) * 100;
+    const chPct = ((geoExposure['Switzerland'] || 0) / totalValue) * 100;
+    if (usPct > 15 || chPct > 5) {
+      const shelters = [];
+      if (usPct > 15) shelters.push(`US (–15%)`);
+      if (chPct > 5) shelters.push(`Switzerland (–10%)`);
+      suggestions.push({
+        sentiment: 'positive',
+        text: `Your exposure to ${shelters.join(' and ')} provides relative shelter — these markets are less affected by European sovereign contagion and historically attract safe-haven flows during EU crises.`,
+      });
+    }
+    if (commodityPct < 3 && mmPct < 5) {
+      suggestions.push({
+        sentiment: 'negative',
+        text: `With both bonds and equities falling in this scenario, cash and gold are the true safe havens. Consider a small allocation to money market funds or gold ETFs as a hedge against correlated sell-offs.`,
+      });
+    }
+  }
+
+  // ── Generic fallbacks (only if scenario-specific didn't trigger enough) ──
+
+  if (suggestions.length < 2 && defensivePct < 10 && impact.portfolioShock < -20) {
+    const bondShock = scenario.shocks['Bonds:*'] ?? 0;
+    const bondEffect = bondShock > 0 ? `In this scenario, bonds would gain ${bondShock}%.` : 'Even modest bond allocation helps absorb equity drawdowns.';
+    suggestions.push({
+      sentiment: 'negative',
+      text: `Your portfolio has only ${defensivePct.toFixed(0)}% in defensive assets (bonds + money market). Adding 15–20% in bonds could reduce this scenario's impact by approximately ${Math.abs(Math.round(0.15 * (bondShock - impact.portfolioShock)))}%. ${bondEffect}`,
+    });
+  }
+
+  if (suggestions.length < 2 && equityPct > 90 && impact.portfolioShock < -25) {
+    suggestions.push({
+      sentiment: 'negative',
+      text: `${equityPct.toFixed(0)}% of your portfolio is in equities. In severe downturns, adding uncorrelated asset classes (commodities, gold, bonds) can dampen losses significantly.`,
+    });
+  }
+
+  // Silver lining — positions that would benefit
+  const gainers = impact.bestPositions.filter(p => p.shock > 0);
+  if (gainers.length > 0 && suggestions.length < 5) {
+    const gainerNames = gainers.map(p => `${p.name} (${p.shock > 0 ? '+' : ''}${p.shock}%)`).join(', ');
+    suggestions.push({
+      sentiment: 'positive',
+      text: `Silver lining: ${gainerNames} would likely gain in this scenario, partially offsetting losses.`,
+    });
+  }
+
+  // Always return at least one suggestion
+  if (suggestions.length === 0) {
+    suggestions.push({
+      sentiment: 'positive',
+      text: `Your portfolio shows balanced exposure to this scenario. Maintaining diversification across asset classes and geographies is the most effective long-term mitigation strategy.`,
+    });
+  }
+
+  return suggestions.slice(0, 5); // cap at 5
+}
+
+// ── Wire & Render ────────────────────────────────────────────────────────────
+
+function wireStressTestCard() {
+  const card = document.getElementById('stressTestCard');
+  if (!card || card.dataset.wired) return;
+  card.dataset.wired = '1';
+
+  const content = document.getElementById('stressTestContent');
+  const container = document.getElementById('stressTestResults');
+
+  // ── Pro gate ──
+  if (!proUnlocked) {
+    const title = card.querySelector('.card-title');
+    if (title && !title.querySelector('.pro-badge')) {
+      const badge = document.createElement('span');
+      badge.className = 'pro-badge';
+      badge.textContent = 'PRO';
+      title.appendChild(badge);
+    }
+
+    // Show blurred mock immediately
+    if (!content.dataset.placeholderBuilt) {
+      content.dataset.placeholderBuilt = '1';
+      const mockWrap = document.createElement('div');
+      mockWrap.className = 'stress-results corr-blur-wrap';
+      mockWrap.style.pointerEvents = 'none';
+      mockWrap.style.userSelect = 'none';
+      const mockGrid = document.createElement('div');
+      mockGrid.className = 'stress-grid';
+      ['COVID-19 Crash', '2022 Rate Hike', 'Liberation Day'].forEach(name => {
+        const c = document.createElement('div');
+        c.className = 'stress-card';
+        c.innerHTML = `<div class="stress-card-header"><div class="stress-card-title">${name} <span class="stress-badge stress-badge--historical">Historical</span></div><div class="stress-card-period">Hypothetical</div></div><div class="stress-card-impact"><span class="stress-impact-pct stress-impact--severe">−24.5%</span><span class="stress-impact-eur">−€12,340</span></div>`;
+        mockGrid.appendChild(c);
+      });
+      mockWrap.appendChild(mockGrid);
+      content.classList.add('pro-placeholder-box');
+      container.appendChild(mockWrap);
+      showProOverlay(content, 'Risk Analysis');
+    }
+    return;
+  }
+
+  // ── Real functionality: auto-render on Insights tab open ──
+  if (!container.dataset.computed) {
+    container.dataset.computed = '1';
+    renderStressTests(container);
+  }
+}
+
+// ── Value at Risk (VaR) ──────────────────────────────────────────────────────
+// Historical simulation: equal-weighted daily portfolio returns, correct
+// percentile index. 1D only — multi-day scaling is not used because √T
+// assumes i.i.d. normal returns (wrong), and overlapping empirical windows
+// from ~250-1250 data points are too correlated to give reliable tail estimates.
+
+function computeVaR(positions, priceHistories) {
+  if (!priceHistories) return null;
+
+  const totalValue = positions.reduce((s, p) => s + p.value, 0);
+  if (totalValue <= 0) return null;
+
+  // Build price maps
+  const posDateMap = {}; // posId -> { date -> price }
+  positions.forEach(p => {
+    const hist = priceHistories[p.id];
+    if (!hist || hist.length < 2) return;
+    const map = {};
+    hist.forEach(d => { map[d.date] = d.price; });
+    posDateMap[p.id] = map;
+  });
+
+  const posIds = Object.keys(posDateMap);
+  if (posIds.length === 0) return null;
+
+  // Sorted union of all trading dates
+  const allDates = [...new Set(
+    posIds.flatMap(id => Object.keys(posDateMap[id]))
+  )].sort();
+
+  // Equal-weighted daily portfolio returns.
+  // Using today's portfolio weights on past data is wrong — a position that
+  // grew to 30% of the portfolio was only 5% on a bad day 2 years ago.
+  // Equal weighting across positions that traded on each day is unbiased.
+  const dailyReturns = [];
+  for (let i = 1; i < allDates.length; i++) {
+    const today = allDates[i];
+    const yest  = allDates[i - 1];
+    let sum = 0, count = 0;
+    posIds.forEach(id => {
+      const pT = posDateMap[id][today];
+      const pY = posDateMap[id][yest];
+      if (pT != null && pY != null && pY > 0) {
+        sum += (pT - pY) / pY;
+        count++;
+      }
+    });
+    // Require at least 30% of positions to have prices on both days
+    if (count >= Math.max(1, posIds.length * 0.3)) {
+      dailyReturns.push(sum / count);
+    }
+  }
+
+  if (dailyReturns.length < 20) return null;
+
+  const sorted = [...dailyReturns].sort((a, b) => a - b);
+  const N = sorted.length;
+
+  // Correct percentile index: Math.ceil((1-conf)*N)-1 finds the last observation
+  // in the worst (1-conf) tail. The old Math.floor version picked one element
+  // too high, systematically understating losses.
+  const getPercentile = (conf) => sorted[Math.max(0, Math.ceil((1 - conf) * N) - 1)];
+
+  return {
+    varByConf: {
+      0.90: getPercentile(0.90),
+      0.95: getPercentile(0.95),
+      0.99: getPercentile(0.99),
+    },
+    worstDay:   sorted[0],
+    totalValue,
+    _dataPoints: N,
+  };
+}
+
+function renderVaRCard(container, positions, priceHistories) {
+  const varData = computeVaR(positions, priceHistories);
+  if (!varData) return;
+
+  const card = document.createElement('div');
+  card.className = 'var-card';
+
+  // Title
+  const titleRow = document.createElement('div');
+  titleRow.className = 'var-title-row';
+  const title = document.createElement('div');
+  title.className = 'var-title';
+  title.textContent = 'Daily Value at Risk (1D VaR)';
+  const subtitle = document.createElement('div');
+  subtitle.className = 'var-subtitle';
+  subtitle.textContent = `Historical simulation · ${varData._dataPoints} trading days · equal-weighted`;
+  titleRow.append(title, subtitle);
+  card.appendChild(titleRow);
+
+  // Confidence toggle only — horizon selector removed
+  const controlsRow = document.createElement('div');
+  controlsRow.className = 'var-controls';
+  const confGroup = document.createElement('div');
+  confGroup.className = 'var-toggle-group';
+  const confLabel = document.createElement('span');
+  confLabel.className = 'var-toggle-label';
+  confLabel.textContent = 'Confidence';
+  confGroup.appendChild(confLabel);
+  const confidences = [{ key: 0.90, label: '90%' }, { key: 0.95, label: '95%' }, { key: 0.99, label: '99%' }];
+  confidences.forEach((c, i) => {
+    const btn = document.createElement('button');
+    btn.className = 'var-btn var-btn--conf' + (i === 1 ? ' active' : '');
+    btn.dataset.conf = c.key;
+    btn.textContent = c.label;
+    confGroup.appendChild(btn);
+  });
+  controlsRow.appendChild(confGroup);
+  card.appendChild(controlsRow);
+
+  // Result display
+  const resultRow = document.createElement('div');
+  resultRow.className = 'var-result';
+  const resultPct = document.createElement('span');
+  resultPct.className = 'var-result-pct';
+  resultRow.appendChild(resultPct);
+  const resultDesc = document.createElement('div');
+  resultDesc.className = 'var-result-desc';
+  // Worst day — always visible as a sanity anchor
+  const worstDayNote = document.createElement('div');
+  worstDayNote.className = 'var-result-desc';
+  worstDayNote.style.cssText = 'margin-top:6px;opacity:0.6;';
+  worstDayNote.textContent = `Worst single day in dataset: ${(varData.worstDay * 100).toFixed(2)}%  (${fmtEur(varData.worstDay * varData.totalValue)})`;
+  card.append(resultRow, resultDesc, worstDayNote);
+
+  let activeConf = 0.95;
+
+  function updateDisplay() {
+    const val = varData.varByConf[activeConf];
+    if (val == null) return;
+    resultPct.textContent = (val * 100).toFixed(2) + '%';
+    const confPct = Math.round(activeConf * 100);
+    resultDesc.textContent = `${confPct}% of trading days, your portfolio will not lose more than ${fmtEur(Math.abs(val * varData.totalValue))} in a single day`;
+  }
+
+  confGroup.querySelectorAll('.var-btn--conf').forEach(btn => {
+    btn.addEventListener('click', () => {
+      confGroup.querySelectorAll('.var-btn--conf').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      activeConf = parseFloat(btn.dataset.conf);
+      updateDisplay();
+    });
+  });
+
+  updateDisplay();
+  container.appendChild(card);
+}
+
+function renderStressTests(container) {
+  container.innerHTML = '';
+
+  const positions = globalData.positions || [];
+  if (positions.length === 0) {
+    container.textContent = 'No positions to analyse.';
+    return;
+  }
+
+  // Get cached price histories for actual-data lookups (5Y data from VWD)
+  const priceHistories = globalData.priceHistories5Y || null;
+
+  // ── Value at Risk card (top of stress test section) ──
+  renderVaRCard(container, positions, priceHistories);
+
+  const wrap = document.createElement('div');
+  wrap.className = 'stress-results';
+
+  // Stress Test heading above scenario grids
+  const stressHeading = document.createElement('div');
+  stressHeading.className = 'stress-heading';
+  stressHeading.textContent = 'Stress Test';
+  wrap.appendChild(stressHeading);
+
+  // Compute all scenarios
+  const historical = STRESS_SCENARIOS.filter(s => s.type === 'historical');
+  const hypothetical = STRESS_SCENARIOS.filter(s => s.type === 'hypothetical');
+
+  const renderSection = (scenarios, label) => {
+    const title = document.createElement('div');
+    title.className = 'stress-section-title';
+    title.textContent = label;
+    wrap.appendChild(title);
+
+    const grid = document.createElement('div');
+    grid.className = 'stress-grid';
+
+    scenarios.forEach(scenario => {
+      const impact = computeStressTest(positions, scenario, priceHistories);
+      if (!impact) return;
+      const mitigations = generateMitigations(impact, positions);
+
+      const card = document.createElement('div');
+      card.className = 'stress-card';
+
+      // Impact severity class
+      const severityClass = impact.portfolioShock <= -30 ? 'stress-impact--extreme'
+        : impact.portfolioShock <= -20 ? 'stress-impact--severe'
+        : impact.portfolioShock <= -10 ? 'stress-impact--moderate'
+        : impact.portfolioShock > 0 ? 'stress-impact--positive'
+        : 'stress-impact--mild';
+
+      // Bar width: normalize to worst possible (max 60%)
+      const barWidth = Math.min(100, Math.abs(impact.portfolioShock) / 60 * 100);
+      const barColor = impact.portfolioShock <= -30 ? '#E05252'
+        : impact.portfolioShock <= -20 ? '#F45D45'
+        : impact.portfolioShock <= -10 ? '#F97316'
+        : impact.portfolioShock > 0 ? '#2ACA69'
+        : '#E8C832';
+
+      // Badge
+      const badgeClass = scenario.type === 'historical' ? 'stress-badge--historical' : 'stress-badge--hypothetical';
+      const badgeLabel = scenario.type === 'historical' ? 'Historical' : 'Hypothetical';
+
+      // Card header + summary
+      const header = document.createElement('div');
+      header.className = 'stress-card-header';
+      header.innerHTML = `<div class="stress-card-title">${scenario.name} <span class="stress-badge ${badgeClass}">${badgeLabel}</span></div>`
+        + (scenario.period ? `<div class="stress-card-period">${scenario.period}</div>` : '');
+
+      const impactRow = document.createElement('div');
+      impactRow.className = 'stress-card-impact';
+      const sign = impact.portfolioShock > 0 ? '+' : '';
+      impactRow.innerHTML = `<span class="stress-impact-pct ${severityClass}">${sign}${impact.portfolioShock.toFixed(1)}%</span>`
+        + `<span class="stress-impact-eur">${impact.eurLoss >= 0 ? '+' : ''}${fmtEur(impact.eurLoss)}</span>`;
+
+      const bar = document.createElement('div');
+      bar.className = 'stress-card-bar';
+      bar.innerHTML = `<div class="stress-card-bar-inner" style="width:${barWidth}%;background:${barColor}"></div>`;
+
+      // Detail section (hidden until expanded)
+      const detail = document.createElement('div');
+      detail.className = 'stress-detail';
+
+      // Description
+      const descEl = document.createElement('div');
+      descEl.className = 'stress-detail-section';
+      descEl.innerHTML = `<div style="font-size:11px;color:var(--muted);line-height:1.6;margin-bottom:4px">${scenario.description}</div>`;
+      if (impact.actualCount > 0) {
+        descEl.innerHTML += `<div style="font-size:10px;color:var(--muted);opacity:0.7;margin-top:4px">${impact.actualCount}/${impact.totalCount} positions used actual price data from this period.</div>`;
+      }
+      detail.appendChild(descEl);
+
+      // ── Chart: historical = "what actually happened"; hypothetical = 3-scenario fan ──
+      const isHistorical = scenario.type === 'historical';
+
+      // Hypothetical-only: scenario name labels
+      const SCENARIO_NAMES = {
+        ai_bubble:       ['Orderly Correction',  'Prolonged Deflation', 'Dot-com Style Rout'],
+        taiwan_invasion: ['Swift De-escalation', 'Prolonged Conflict',  'Full Escalation'],
+        eu_debt_crisis:  ['ECB Backstop',        'Austerity Drag',      'Sovereign Default'],
+      };
+      const scNames = SCENARIO_NAMES[scenario.id] || ['Optimistic', 'Realistic', 'Pessimistic'];
+
+      const chartSection = document.createElement('div');
+      chartSection.className = 'stress-detail-section stress-chart-section';
+      const chartLabel = document.createElement('div');
+      chartLabel.className = 'stress-detail-label';
+      chartLabel.textContent = isHistorical ? 'What Actually Happened' : '6-Month Projection';
+      const chartWrap = document.createElement('div');
+      chartWrap.className = 'stress-chart-wrap';
+      const chartCanvas = document.createElement('canvas');
+      chartWrap.appendChild(chartCanvas);
+      chartSection.append(chartLabel, chartWrap);
+      detail.appendChild(chartSection);
+
+      // Render the chart when the card expands
+      let chartRendered = false;
+      const renderImpactChart = () => {
+        if (chartRendered) return;
+        chartRendered = true;
+
+        const totalVal = impact.totalValue;
+        const shockPct = impact.portfolioShock;
+        const shockFrac = shockPct / 100;
+
+        if (isHistorical) {
+          // ── Single "what happened" line for historical scenarios ────────────
+          // Parameters tuned per event to reflect the actual market shape.
+          const HIST_SHAPES = {
+            covid_2020:          { crashDays: 24, troughDepth: 1.00, recoveryDays: 106, recoveryFrac: 1.02, noise: 0.018, color: '#EF5350', label: 'Your portfolio impact', totalDays: 130 },
+            rate_hike_2022:      { crashDays: 55, troughDepth: 1.00, recoveryDays: 75,  recoveryFrac: 0.38, noise: 0.011, color: '#F59E0B', label: 'Your portfolio impact', totalDays: 130 },
+            liberation_day_2025: { crashDays: 6,  troughDepth: 1.00, recoveryDays: 124, recoveryFrac: 0.85, noise: 0.012, color: '#F59E0B', label: 'Your portfolio impact', totalDays: 130 },
+          };
+          const shape = HIST_SHAPES[scenario.id] || { crashDays: 20, troughDepth: 1.00, recoveryDays: 110, recoveryFrac: 0.50, noise: 0.015, color: '#F59E0B', label: 'Your portfolio impact', totalDays: 130 };
+
+          let _seed = 77;
+          const seededRandom = () => { _seed = (_seed * 16807 + 0) % 2147483647; return _seed / 2147483647; };
+
+          const totalDays = shape.totalDays;
+          const labels = [];
+          const data = [];
+          let troughVal = Infinity, troughIdx = 0;
+
+          for (let d = 0; d <= totalDays; d++) {
+            let pctChange;
+            const troughPct = shockFrac * shape.troughDepth;
+            if (d <= shape.crashDays) {
+              // Crash phase: exponential plunge
+              const t = d / shape.crashDays;
+              pctChange = troughPct * (1 - Math.exp(-4 * t)) / (1 - Math.exp(-4));
+            } else {
+              // Recovery phase: partial bounce
+              const t = (d - shape.crashDays) / (totalDays - shape.crashDays);
+              const recoveryAmount = Math.abs(troughPct) * shape.recoveryFrac;
+              pctChange = troughPct + recoveryAmount * (1 - Math.exp(-2 * t)) / (1 - Math.exp(-2));
+            }
+            pctChange += (seededRandom() - 0.5) * Math.abs(shockFrac) * shape.noise;
+
+            if (d === 0) labels.push('Today');
+            else if (d % 20 === 0) labels.push(`M${d / 20}`);
+            else labels.push('');
+
+            const val = Math.round(totalVal * (1 + pctChange));
+            data.push(val);
+            if (val < troughVal) { troughVal = val; troughIdx = d; }
+          }
+
+          const baselineVal = totalVal;
+          const allMin = Math.min(...data);
+          const allMax = Math.max(...data);
+
+          const ctx = chartCanvas.getContext('2d');
+          const gradient = ctx.createLinearGradient(0, 0, 0, 320);
+          gradient.addColorStop(0, shape.color + '22');
+          gradient.addColorStop(1, shape.color + '00');
+
+          const annotationPlugin = {
+            id: 'histAnnotations',
+            afterDraw(chart) {
+              const { ctx: c, chartArea: { left, right, top, bottom }, scales: { x, y } } = chart;
+
+              // Dashed baseline
+              const baseY = y.getPixelForValue(baselineVal);
+              c.save();
+              c.setLineDash([5, 4]);
+              c.strokeStyle = 'rgba(255,255,255,0.18)';
+              c.lineWidth = 1;
+              c.beginPath(); c.moveTo(left, baseY); c.lineTo(right, baseY); c.stroke();
+              c.restore();
+              c.save();
+              c.font = "9px 'DM Mono', monospace";
+              c.fillStyle = 'rgba(255,255,255,0.30)';
+              c.textAlign = 'right';
+              c.fillText(`Start: ${fmtEur(baselineVal)}`, right - 4, baseY - 5);
+              c.restore();
+
+              // Phase divider at crash trough
+              const divX = x.getPixelForValue(shape.crashDays);
+              c.save();
+              c.setLineDash([3, 3]);
+              c.strokeStyle = 'rgba(255,255,255,0.07)';
+              c.lineWidth = 1;
+              c.beginPath(); c.moveTo(divX, top); c.lineTo(divX, bottom); c.stroke();
+              c.restore();
+              c.save();
+              c.font = "bold 8px 'DM Mono', monospace";
+              c.textAlign = 'center';
+              c.fillStyle = 'rgba(239,83,80,0.5)';
+              c.fillText('CRASH', (left + divX) / 2, top + 12);
+              c.fillStyle = 'rgba(76,175,80,0.4)';
+              c.fillText('RECOVERY', (divX + right) / 2, top + 12);
+              c.restore();
+
+              // End-state pill
+              const endVal = data[data.length - 1];
+              const endPct = ((endVal / baselineVal) - 1) * 100;
+              const endY = y.getPixelForValue(endVal);
+              c.save();
+              const label = `${endPct.toFixed(1)}%`;
+              c.font = "bold 9px 'DM Mono', monospace";
+              const tw = c.measureText(label).width;
+              const pillW = tw + 10, pillH = 17;
+              const pillX = right - pillW - 3;
+              const pillY = endY - pillH - 5;
+              const rr = 3;
+              c.fillStyle = shape.color + '28';
+              c.beginPath();
+              c.moveTo(pillX + rr, pillY); c.lineTo(pillX + pillW - rr, pillY);
+              c.quadraticCurveTo(pillX + pillW, pillY, pillX + pillW, pillY + rr);
+              c.lineTo(pillX + pillW, pillY + pillH - rr);
+              c.quadraticCurveTo(pillX + pillW, pillY + pillH, pillX + pillW - rr, pillY + pillH);
+              c.lineTo(pillX + rr, pillY + pillH);
+              c.quadraticCurveTo(pillX, pillY + pillH, pillX, pillY + pillH - rr);
+              c.lineTo(pillX, pillY + rr);
+              c.quadraticCurveTo(pillX, pillY, pillX + rr, pillY);
+              c.closePath(); c.fill();
+              c.fillStyle = shape.color;
+              c.textAlign = 'center'; c.textBaseline = 'middle';
+              c.fillText(label, pillX + pillW / 2, pillY + pillH / 2);
+              c.restore();
+
+              // Trough marker
+              const trX = x.getPixelForValue(troughIdx);
+              const trY = y.getPixelForValue(troughVal);
+              const trPct = ((troughVal / baselineVal) - 1) * 100;
+              c.save();
+              c.beginPath(); c.arc(trX, trY, 3.5, 0, Math.PI * 2);
+              c.fillStyle = '#EF5350'; c.fill();
+              c.strokeStyle = '#fff'; c.lineWidth = 1.5; c.stroke();
+              c.restore();
+              const trLabel = `Max drawdown: ${trPct.toFixed(1)}%`;
+              c.save();
+              c.font = "bold 9px 'DM Mono', monospace";
+              const trTw = c.measureText(trLabel).width;
+              const trBoxW = trTw + 12, trBoxH = 20;
+              const trBoxX = Math.min(trX - trBoxW / 2, right - trBoxW - 4);
+              const trBoxY = trY + 12;
+              const trR = 3;
+              c.fillStyle = 'rgba(239,83,80,0.92)';
+              c.beginPath();
+              c.moveTo(trBoxX + trR, trBoxY); c.lineTo(trBoxX + trBoxW - trR, trBoxY);
+              c.quadraticCurveTo(trBoxX + trBoxW, trBoxY, trBoxX + trBoxW, trBoxY + trR);
+              c.lineTo(trBoxX + trBoxW, trBoxY + trBoxH - trR);
+              c.quadraticCurveTo(trBoxX + trBoxW, trBoxY + trBoxH, trBoxX + trBoxW - trR, trBoxY + trBoxH);
+              c.lineTo(trBoxX + trR, trBoxY + trBoxH);
+              c.quadraticCurveTo(trBoxX, trBoxY + trBoxH, trBoxX, trBoxY + trBoxH - trR);
+              c.lineTo(trBoxX, trBoxY + trR);
+              c.quadraticCurveTo(trBoxX, trBoxY, trBoxX + trR, trBoxY);
+              c.closePath(); c.fill();
+              c.beginPath();
+              c.moveTo(trX - 4, trBoxY); c.lineTo(trX, trBoxY - 5); c.lineTo(trX + 4, trBoxY);
+              c.closePath(); c.fill();
+              c.fillStyle = '#fff'; c.textAlign = 'center'; c.textBaseline = 'middle';
+              c.fillText(trLabel, trBoxX + trBoxW / 2, trBoxY + trBoxH / 2);
+              c.restore();
+            },
+          };
+
+          new Chart(chartCanvas.getContext('2d'), {
+            type: 'line',
+            data: {
+              labels,
+              datasets: [{
+                label: shape.label,
+                data,
+                borderColor: shape.color,
+                backgroundColor: gradient,
+                borderWidth: 2.5,
+                fill: true,
+                tension: 0.35,
+                pointRadius: 0,
+                pointHoverRadius: 4,
+                pointHoverBackgroundColor: shape.color,
+                pointHoverBorderColor: '#fff',
+                pointHoverBorderWidth: 2,
+              }],
+            },
+            plugins: [annotationPlugin],
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              animation: { duration: 900, easing: 'easeOutQuart' },
+              layout: { padding: { top: 22, right: 72, bottom: 4, left: 6 } },
+              plugins: {
+                legend: { display: false },
+                tooltip: {
+                  backgroundColor: 'rgba(21,32,43,0.95)',
+                  titleFont: { family: "'DM Mono', monospace", size: 10 },
+                  bodyFont: { family: "'DM Mono', monospace", size: 11, weight: 'bold' },
+                  padding: 10,
+                  borderColor: 'rgba(255,255,255,0.13)',
+                  borderWidth: 1,
+                  cornerRadius: 6,
+                  callbacks: {
+                    title: (items) => {
+                      const idx = items[0].dataIndex;
+                      if (idx === 0) return 'Start of event';
+                      const month = Math.floor(idx / 20);
+                      const day = idx % 20;
+                      return month > 0 ? `Month ${month}, Day ${day + 1}` : `Day ${idx}`;
+                    },
+                    label: (item) => {
+                      const val = item.raw;
+                      const pct = ((val / baselineVal) - 1) * 100;
+                      const sign = pct >= 0 ? '+' : '';
+                      return ` Portfolio: ${fmtEur(val)}  (${sign}${pct.toFixed(1)}%)`;
+                    },
+                  },
+                },
+              },
+              scales: {
+                x: {
+                  grid: { display: false },
+                  ticks: { font: { family: "'DM Mono', monospace", size: 9 }, color: 'rgba(255,255,255,0.35)', maxRotation: 0, autoSkip: false, callback: function(val, idx) { return labels[idx] || ''; } },
+                  border: { display: false },
+                },
+                y: {
+                  grid: { color: 'rgba(255,255,255,0.05)', drawBorder: false },
+                  ticks: { font: { family: "'DM Mono', monospace", size: 9 }, color: 'rgba(255,255,255,0.35)', callback: function(val) { if (Math.abs(val) >= 1000000) return '€' + (val / 1000000).toFixed(1) + 'M'; return '€' + (val / 1000).toFixed(0) + 'k'; }, maxTicksLimit: 5 },
+                  border: { display: false },
+                  min: allMin * 0.97,
+                  max: allMax * 1.02,
+                },
+              },
+              interaction: { mode: 'index', intersect: false },
+            },
+          });
+          return; // done for historical
+        }
+
+        // ── Hypothetical: 3-scenario fan (unchanged) ──────────────────────────
+        const scenarioDefs = [
+          {
+            name: scNames[0], // Optimistic
+            crashDepth: 0.55,
+            overshoot: 1.00,
+            phase1Days: 12,
+            phase2Days: 25,
+            recoveryFrac: 0.75,
+            noise: 0.013,
+            color: '#4CAF50',
+            fillAlpha: 0.06,
+          },
+          {
+            name: scNames[1], // Realistic
+            crashDepth: 0.70,
+            overshoot: 1.08,
+            phase1Days: 20,
+            phase2Days: 50,
+            recoveryFrac: 0.30,
+            noise: 0.019,
+            color: '#F59E0B',
+            fillAlpha: 0.10,
+          },
+          {
+            name: scNames[2], // Pessimistic
+            crashDepth: 0.90,
+            overshoot: 1.28,
+            phase1Days: 18,
+            phase2Days: 65,
+            recoveryFrac: 0.07,
+            noise: 0.025,
+            color: '#EF5350',
+            fillAlpha: 0.15,
+          },
+        ];
+
+        const tradingDays = 130;
+        const labels = [];
+        for (let d = 0; d <= tradingDays; d++) {
+          if (d === 0) labels.push('Today');
+          else if (d % 20 === 0) labels.push(`M${d / 20}`);
+          else labels.push('');
+        }
+
+        // Seeded random for reproducible curves
+        let _seed = 42;
+        const seededRandom = () => { _seed = (_seed * 16807 + 0) % 2147483647; return _seed / 2147483647; };
+
+        const allSeries = scenarioDefs.map((sc, idx) => {
+          const data = [];
+          let troughIdx = 0, troughVal = Infinity;
+          _seed = idx * 1000 + 42;
+
+          for (let d = 0; d <= tradingDays; d++) {
+            let pctChange;
+            if (d <= sc.phase1Days) {
+              const t = d / sc.phase1Days;
+              pctChange = shockFrac * sc.crashDepth * (1 - Math.exp(-3.5 * t)) / (1 - Math.exp(-3.5));
+              pctChange += (seededRandom() - 0.52) * Math.abs(shockFrac) * sc.noise;
+            } else if (d <= sc.phase2Days) {
+              const p1End = shockFrac * sc.crashDepth;
+              const trough = shockFrac * sc.overshoot;
+              const t = (d - sc.phase1Days) / (sc.phase2Days - sc.phase1Days);
+              pctChange = p1End + (trough - p1End) * t;
+              pctChange += (seededRandom() - 0.48) * Math.abs(shockFrac) * sc.noise * 1.3;
+            } else {
+              const troughPct = shockFrac * sc.overshoot;
+              const recovery = Math.abs(shockFrac) * sc.overshoot * sc.recoveryFrac;
+              const t = (d - sc.phase2Days) / (tradingDays - sc.phase2Days);
+              pctChange = troughPct + recovery * (1 - Math.exp(-2.5 * t)) / (1 - Math.exp(-2.5));
+              pctChange += (seededRandom() - 0.45) * Math.abs(shockFrac) * sc.noise * 1.1;
+            }
+
+            const val = totalVal * (1 + pctChange);
+            data.push(Math.round(val));
+            if (val < troughVal) { troughVal = val; troughIdx = d; }
+          }
+          return { ...sc, data, troughIdx, troughVal };
+        });
+
+        const baselineVal = totalVal;
+        const allVals = allSeries.flatMap(s => s.data);
+        const globalMin = Math.min(...allVals);
+        const globalMax = Math.max(...allVals);
+
+        const ctx = chartCanvas.getContext('2d');
+
+        // Datasets — pessimistic (red) drawn first so it renders behind
+        const datasets = [...allSeries].reverse().map(sc => {
+          const gradient = ctx.createLinearGradient(0, 0, 0, 300);
+          gradient.addColorStop(0, sc.color + '00');
+          gradient.addColorStop(1, sc.color + Math.round(sc.fillAlpha * 255).toString(16).padStart(2, '0'));
+          return {
+            label: sc.name,
+            data: sc.data,
+            borderColor: sc.color,
+            backgroundColor: gradient,
+            borderWidth: 2,
+            fill: sc.name === scNames[2], // only fill pessimistic area
+            tension: 0.3,
+            pointRadius: 0,
+            pointHoverRadius: 4,
+            pointHoverBackgroundColor: sc.color,
+            pointHoverBorderColor: '#fff',
+            pointHoverBorderWidth: 2,
+          };
+        });
+
+        // Custom annotation plugin: baseline, phase labels, end-state pills, trough marker
+        const annotationPlugin = {
+          id: 'stressAnnotations',
+          afterDraw(chart) {
+            const { ctx: c, chartArea: { left, right, top, bottom }, scales: { x, y } } = chart;
+
+            // 1. Dashed baseline
+            const baseY = y.getPixelForValue(baselineVal);
+            c.save();
+            c.setLineDash([5, 4]);
+            c.strokeStyle = 'rgba(255,255,255,0.18)';
+            c.lineWidth = 1;
+            c.beginPath(); c.moveTo(left, baseY); c.lineTo(right, baseY); c.stroke();
+            c.restore();
+
+            c.save();
+            c.font = "9px 'DM Mono', monospace";
+            c.fillStyle = 'rgba(255,255,255,0.30)';
+            c.textAlign = 'right';
+            c.fillText(`Start: ${fmtEur(baselineVal)}`, right - 4, baseY - 5);
+            c.restore();
+
+            // 2. Phase dividers (anchored to realistic scenario)
+            const refSc = allSeries[1];
+            const p1X = x.getPixelForValue(refSc.phase1Days);
+            const p2X = x.getPixelForValue(refSc.phase2Days);
+
+            c.save();
+            c.setLineDash([3, 3]);
+            c.strokeStyle = 'rgba(255,255,255,0.07)';
+            c.lineWidth = 1;
+            [p1X, p2X].forEach(px => {
+              c.beginPath(); c.moveTo(px, top); c.lineTo(px, bottom); c.stroke();
+            });
+            c.restore();
+
+            c.save();
+            c.font = "bold 8px 'DM Mono', monospace";
+            c.textAlign = 'center';
+            c.fillStyle = 'rgba(239,83,80,0.5)';
+            c.fillText('SELL-OFF', (left + p1X) / 2, top + 12);
+            c.fillStyle = 'rgba(248,150,30,0.4)';
+            c.fillText('DECLINE', (p1X + p2X) / 2, top + 12);
+            c.fillStyle = 'rgba(76,175,80,0.4)';
+            c.fillText('RECOVERY', (p2X + right) / 2, top + 12);
+            c.restore();
+
+            // 3. End-state pill badges (right edge)
+            allSeries.forEach(sc => {
+              const endVal = sc.data[sc.data.length - 1];
+              const endPct = ((endVal / baselineVal) - 1) * 100;
+              const endY = y.getPixelForValue(endVal);
+
+              c.save();
+              const label = `${endPct.toFixed(1)}%`;
+              c.font = "bold 9px 'DM Mono', monospace";
+              const tw = c.measureText(label).width;
+              const pillW = tw + 10, pillH = 17;
+              const pillX = right - pillW - 3;
+              const pillY = endY - pillH - 5;
+              const rr = 3;
+
+              c.fillStyle = sc.color + '28';
+              c.beginPath();
+              c.moveTo(pillX + rr, pillY);
+              c.lineTo(pillX + pillW - rr, pillY);
+              c.quadraticCurveTo(pillX + pillW, pillY, pillX + pillW, pillY + rr);
+              c.lineTo(pillX + pillW, pillY + pillH - rr);
+              c.quadraticCurveTo(pillX + pillW, pillY + pillH, pillX + pillW - rr, pillY + pillH);
+              c.lineTo(pillX + rr, pillY + pillH);
+              c.quadraticCurveTo(pillX, pillY + pillH, pillX, pillY + pillH - rr);
+              c.lineTo(pillX, pillY + rr);
+              c.quadraticCurveTo(pillX, pillY, pillX + rr, pillY);
+              c.closePath();
+              c.fill();
+
+              c.fillStyle = sc.color;
+              c.textAlign = 'center';
+              c.textBaseline = 'middle';
+              c.fillText(label, pillX + pillW / 2, pillY + pillH / 2);
+              c.restore();
+            });
+
+            // 4. Trough marker on pessimistic scenario
+            const worstSc = allSeries[2];
+            const trX = x.getPixelForValue(worstSc.troughIdx);
+            const trY = y.getPixelForValue(worstSc.troughVal);
+            const trPct = ((worstSc.troughVal / baselineVal) - 1) * 100;
+
+            c.save();
+            c.beginPath();
+            c.arc(trX, trY, 3.5, 0, Math.PI * 2);
+            c.fillStyle = '#EF5350';
+            c.fill();
+            c.strokeStyle = '#fff';
+            c.lineWidth = 1.5;
+            c.stroke();
+            c.restore();
+
+            const trLabel = `Max drawdown: ${trPct.toFixed(1)}%`;
+            c.save();
+            c.font = "bold 9px 'DM Mono', monospace";
+            const trTw = c.measureText(trLabel).width;
+            const trBoxW = trTw + 12, trBoxH = 20;
+            const trBoxX = Math.min(trX - trBoxW / 2, right - trBoxW - 4);
+            const trBoxY = trY + 12;
+            const trR = 3;
+
+            c.fillStyle = 'rgba(239,83,80,0.92)';
+            c.beginPath();
+            c.moveTo(trBoxX + trR, trBoxY);
+            c.lineTo(trBoxX + trBoxW - trR, trBoxY);
+            c.quadraticCurveTo(trBoxX + trBoxW, trBoxY, trBoxX + trBoxW, trBoxY + trR);
+            c.lineTo(trBoxX + trBoxW, trBoxY + trBoxH - trR);
+            c.quadraticCurveTo(trBoxX + trBoxW, trBoxY + trBoxH, trBoxX + trBoxW - trR, trBoxY + trBoxH);
+            c.lineTo(trBoxX + trR, trBoxY + trBoxH);
+            c.quadraticCurveTo(trBoxX, trBoxY + trBoxH, trBoxX, trBoxY + trBoxH - trR);
+            c.lineTo(trBoxX, trBoxY + trR);
+            c.quadraticCurveTo(trBoxX, trBoxY, trBoxX + trR, trBoxY);
+            c.closePath();
+            c.fill();
+
+            c.beginPath();
+            c.moveTo(trX - 4, trBoxY);
+            c.lineTo(trX, trBoxY - 5);
+            c.lineTo(trX + 4, trBoxY);
+            c.closePath();
+            c.fill();
+
+            c.fillStyle = '#fff';
+            c.textAlign = 'center';
+            c.textBaseline = 'middle';
+            c.fillText(trLabel, trBoxX + trBoxW / 2, trBoxY + trBoxH / 2);
+            c.restore();
+          }
+        };
+
+        new Chart(ctx, {
+          type: 'line',
+          data: { labels, datasets },
+          plugins: [annotationPlugin],
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: { duration: 900, easing: 'easeOutQuart' },
+            layout: { padding: { top: 22, right: 72, bottom: 4, left: 6 } },
+            plugins: {
+              legend: {
+                display: true,
+                position: 'bottom',
+                labels: {
+                  color: 'rgba(255,255,255,0.55)',
+                  font: { family: "'DM Mono', monospace", size: 10 },
+                  usePointStyle: true,
+                  pointStyle: 'line',
+                  padding: 14,
+                  boxWidth: 20,
+                  boxHeight: 2,
+                },
+              },
+              tooltip: {
+                backgroundColor: 'rgba(21,32,43,0.95)',
+                titleFont: { family: "'DM Mono', monospace", size: 10 },
+                bodyFont: { family: "'DM Mono', monospace", size: 11, weight: 'bold' },
+                padding: 10,
+                borderColor: 'rgba(255,255,255,0.13)',
+                borderWidth: 1,
+                cornerRadius: 6,
+                displayColors: true,
+                boxWidth: 8,
+                boxHeight: 2,
+                usePointStyle: true,
+                callbacks: {
+                  title: (items) => {
+                    const idx = items[0].dataIndex;
+                    if (idx === 0) return 'Today';
+                    const month = Math.floor(idx / 20);
+                    const day = idx % 20;
+                    return `Month ${month}, Day ${day + 1}`;
+                  },
+                  label: (item) => {
+                    const val = item.raw;
+                    const pct = ((val / baselineVal) - 1) * 100;
+                    const sign = pct >= 0 ? '+' : '';
+                    return ` ${item.dataset.label}: ${fmtEur(val)}  (${sign}${pct.toFixed(1)}%)`;
+                  },
+                },
+              },
+            },
+            scales: {
+              x: {
+                grid: { display: false },
+                ticks: {
+                  font: { family: "'DM Mono', monospace", size: 9 },
+                  color: 'rgba(255,255,255,0.35)',
+                  maxRotation: 0,
+                  autoSkip: false,
+                  callback: function(val, idx) { return labels[idx] || ''; },
+                },
+                border: { display: false },
+              },
+              y: {
+                grid: { color: 'rgba(255,255,255,0.05)', drawBorder: false },
+                ticks: {
+                  font: { family: "'DM Mono', monospace", size: 9 },
+                  color: 'rgba(255,255,255,0.35)',
+                  callback: function(val) {
+                    // Use k/M suffix, currency-neutral
+                    if (Math.abs(val) >= 1000000) return '€' + (val / 1000000).toFixed(1) + 'M';
+                    return '€' + (val / 1000).toFixed(0) + 'k';
+                  },
+                  maxTicksLimit: 5,
+                },
+                border: { display: false },
+                min: globalMin * 0.96,
+                max: globalMax * 1.02,
+              },
+            },
+            interaction: { mode: 'index', intersect: false },
+          },
+        });
+      };
+
+      // Render chart the first time the card is expanded
+      const expandObserver = new MutationObserver(() => {
+        if (card.classList.contains('expanded')) {
+          renderImpactChart();
+          expandObserver.disconnect();
+        }
+      });
+      expandObserver.observe(card, { attributes: true, attributeFilter: ['class'] });
+
+      // ── Worst-hit positions ──────────────────────────────────────────────
+      const posSection = document.createElement('div');
+      posSection.className = 'stress-detail-section';
+      posSection.innerHTML = `<div class="stress-detail-label">Most affected positions</div>`;
+      const posList = document.createElement('div');
+      posList.className = 'stress-positions';
+
+      impact.worstPositions.forEach(p => {
+        const maxShock = Math.max(1, Math.abs(impact.worstPositions[0].shock));
+        const posBarW = Math.min(100, Math.abs(p.shock) / maxShock * 100);
+        const posBarColor = p.shock < -20 ? '#E05252' : p.shock < -10 ? '#F97316' : p.shock < 0 ? '#E8C832' : '#2ACA69';
+
+        const row = document.createElement('div');
+        row.className = 'stress-pos-row';
+        // sanitize() is applied to p.name and p.source — both are API-derived
+        // strings (DEGIRO product names / 'actual'|'model') and must be escaped
+        // before insertion into innerHTML to prevent XSS via a malformed API response.
+        // posBarColor, posBarW, p.shock, p.eurImpact are all computed numbers — safe.
+        row.innerHTML = `<span class="stress-pos-name">${sanitize(p.name)}</span>`
+          + `<span class="stress-pos-pct" style="color:${posBarColor}">${p.shock > 0 ? '+' : ''}${p.shock.toFixed(1)}%</span>`
+          + `<div class="stress-pos-bar-wrap"><div class="stress-pos-bar" style="width:${posBarW}%;background:${posBarColor}"></div></div>`
+          + `<span class="stress-pos-eur">${p.eurImpact >= 0 ? '+' : ''}${fmtEur(p.eurImpact)}</span>`
+          + `<span class="stress-pos-source stress-pos-source--${sanitize(p.source)}">${sanitize(p.source)}</span>`;
+        posList.appendChild(row);
+      });
+      posSection.appendChild(posList);
+      detail.appendChild(posSection);
+
+      // Mitigations
+      if (mitigations.length > 0) {
+        const mitSection = document.createElement('div');
+        mitSection.className = 'stress-detail-section';
+        mitSection.innerHTML = `<div class="stress-detail-label">How to reduce exposure</div>`;
+        const mitList = document.createElement('div');
+        mitList.className = 'stress-mitigations';
+        mitigations.forEach(m => {
+          const mit = document.createElement('div');
+          mit.className = 'stress-mitigation' + (m.sentiment === 'positive' ? ' stress-mitigation--positive' : m.sentiment === 'negative' ? ' stress-mitigation--negative' : '');
+          mit.textContent = m.text;
+          mitList.appendChild(mit);
+        });
+        mitSection.appendChild(mitList);
+        detail.appendChild(mitSection);
+      }
+
+      // Collapse button
+      const collapseBtn = document.createElement('button');
+      collapseBtn.className = 'stress-card-collapse';
+      collapseBtn.textContent = '↑ Collapse';
+
+      card.append(header, impactRow, bar, detail, collapseBtn);
+
+      // Click to expand/collapse
+      card.addEventListener('click', (e) => {
+        if (e.target === collapseBtn) return;
+        if (card.classList.contains('expanded')) return;
+        grid.querySelectorAll('.stress-card.expanded').forEach(c => c.classList.remove('expanded'));
+        card.classList.add('expanded');
+      });
+      collapseBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        card.classList.remove('expanded');
+      });
+
+      grid.appendChild(card);
+    });
+
+    wrap.appendChild(grid);
+  };
+
+  renderSection(historical, 'Historical Scenarios');
+  renderSection(hypothetical, 'Hypothetical Scenarios');
+
+  container.appendChild(wrap);
 }
