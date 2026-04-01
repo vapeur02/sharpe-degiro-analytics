@@ -68,3 +68,4 @@ If you want to support the development and maintenance of this free tool, you ca
 
 ---
 *Disclaimer: Sharpe is a community-built tool and is not affiliated with, endorsed by, or connected to DEGIRO or flatexDEGIRO Bank AG. All metrics are calculated locally for informational purposes only and do not constitute financial advice.*
+philippe.veldkamp@gmail.com
