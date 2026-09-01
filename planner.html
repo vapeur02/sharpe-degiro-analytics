@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sharpe — Portfolio Planner</title>
+<style>
+  /* Local fonts — no external requests (paths match the extension bundle) */
+  @font-face { font-family:'Syne'; font-style:normal; font-weight:600; src:url('fonts/syne-latin-600-normal.woff2') format('woff2'); font-display:swap; }
+  @font-face { font-family:'Syne'; font-style:normal; font-weight:700; src:url('fonts/syne-latin-700-normal.woff2') format('woff2'); font-display:swap; }
+  @font-face { font-family:'Syne'; font-style:normal; font-weight:800; src:url('fonts/syne-latin-800-normal.woff2') format('woff2'); font-display:swap; }
+  @font-face { font-family:'JetBrains Mono'; font-style:normal; font-weight:400; src:url('fonts/jetbrains-mono-latin-400-normal.woff2') format('woff2'); font-display:swap; }
+  @font-face { font-family:'JetBrains Mono'; font-style:normal; font-weight:500; src:url('fonts/jetbrains-mono-latin-500-normal.woff2') format('woff2'); font-display:swap; }
+
+  /* Same token names as dashboard.css so this file feels native to the extension */
+  :root {
+    --bg:#080D13; --bg2:#111820; --bg3:#1A2230; --border:#232E3C;
+    --text:#E8ECF1; --muted:#7A8BA0; --dim:#2E3B4A;
+    --accent:#4EA8DE; --green:#34D399; --red:#F87171; --amber:#F59E0B; --violet:#A855F7;
+    --font-mono:'JetBrains Mono',ui-monospace,monospace; --font-display:'Syne',sans-serif;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg:#F0EDE6; --bg2:#F7F5F0; --bg3:#E8E4DC; --border:#D1CDC4;
+      --text:#111827; --muted:#6B7280; --dim:#D1CDC4;
+      --accent:#2563EB; --green:#16A34A; --red:#DC2626; --amber:#B45309; --violet:#7C3AED;
+    }
+  }
+  :root[data-theme="light"] {
+    --bg:#F0EDE6; --bg2:#F7F5F0; --bg3:#E8E4DC; --border:#D1CDC4;
+    --text:#111827; --muted:#6B7280; --dim:#D1CDC4;
+    --accent:#2563EB; --green:#16A34A; --red:#DC2626; --amber:#B45309; --violet:#7C3AED;
+  }
+  :root[data-theme="dark"] {
+    --bg:#080D13; --bg2:#111820; --bg3:#1A2230; --border:#232E3C;
+    --text:#E8ECF1; --muted:#7A8BA0; --dim:#2E3B4A;
+    --accent:#4EA8DE; --green:#34D399; --red:#F87171; --amber:#F59E0B; --violet:#A855F7;
+  }
+
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg); color:var(--text); font-family:var(--font-mono); font-size:13px; line-height:1.5; padding:32px 20px 64px; }
+  .wrap { max-width:860px; margin:0 auto; }
+
+  header { margin-bottom:28px; }
+  .eyebrow { font-size:10px; letter-spacing:.14em; text-transform:uppercase; color:var(--accent); margin-bottom:10px; }
+  h1 { font-family:var(--font-display); font-weight:800; font-size:clamp(24px,4vw,32px); letter-spacing:-.02em; line-height:1.15; margin-bottom:10px; }
+  .lede { color:var(--muted); font-size:13px; max-width:62ch; }
+
+  .card { background:var(--bg2); border-radius:12px; padding:22px; margin-bottom:18px; }
+  .card-title { font-family:var(--font-display); font-weight:700; font-size:14px; margin-bottom:4px; }
+  .card-sub { font-size:11px; color:var(--muted); margin-bottom:16px; }
+
+  /* ── Sliders (mirrors .grade-* in dashboard.css) ───────────────── */
+  .sliders { display:flex; flex-direction:column; gap:16px; }
+  .slider-row { background:var(--bg3); border-radius:10px; padding:14px 18px 12px; }
+  .slider-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:4px; }
+  .slider-label { font-family:var(--font-display); font-size:13px; font-weight:600; }
+  .slider-value { font-family:var(--font-display); font-size:18px; font-weight:700; color:var(--accent); min-width:28px; text-align:right; }
+  .slider-anchors { display:flex; justify-content:space-between; font-size:10px; color:var(--muted); margin-bottom:8px; letter-spacing:.03em; }
+  input[type=range] { -webkit-appearance:none; appearance:none; width:100%; height:6px; background:var(--border); border-radius:3px; outline:none; cursor:pointer; }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; appearance:none; width:18px; height:18px; border-radius:50%; background:var(--accent); border:2px solid var(--bg2); cursor:pointer; transition:transform .15s; }
+  input[type=range]::-webkit-slider-thumb:hover { transform:scale(1.2); }
+  input[type=range]::-moz-range-thumb { width:18px; height:18px; border-radius:50%; background:var(--accent); border:2px solid var(--bg2); cursor:pointer; }
+  input[type=range]:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+  .slider-desc { font-size:11px; color:var(--muted); margin-top:6px; min-height:16px; line-height:1.5; }
+
+  .btn-primary { display:block; width:100%; max-width:340px; margin:22px auto 0; padding:12px 0; border:none; border-radius:8px; background:var(--accent); color:#04121d; font-family:var(--font-display); font-weight:700; font-size:14px; letter-spacing:.02em; cursor:pointer; transition:filter .2s, transform .2s; }
+  .btn-primary:hover { filter:brightness(1.12); transform:scale(1.015); }
+  .btn-primary:focus-visible { outline:2px solid var(--text); outline-offset:2px; }
+  .btn-ghost { background:none; border:1px solid var(--border); color:var(--muted); font-family:var(--font-mono); font-size:11px; padding:7px 14px; border-radius:6px; cursor:pointer; transition:all .2s; }
+  .btn-ghost:hover { border-color:var(--accent); color:var(--accent); }
+
+  /* ── Results ───────────────────────────────────────────────────── */
+  #results { display:none; }
+  .profile-line { display:grid; gap:5px; margin-bottom:20px; }
+  .prof-row { display:grid; grid-template-columns:94px 1fr; gap:12px; align-items:baseline; font-size:12px; }
+  .prof-key { font-size:9px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); }
+  .profile-line strong { color:var(--text); font-weight:500; }
+
+  .alloc-bar { display:flex; height:26px; border-radius:7px; overflow:hidden; gap:2px; margin-bottom:12px; }
+  .alloc-seg { display:flex; align-items:center; justify-content:center; font-size:10px; font-weight:600; color:#04121d; min-width:3px; }
+  .alloc-rows { display:flex; flex-direction:column; gap:8px; }
+  .alloc-row { display:grid; grid-template-columns:10px 1fr 52px; align-items:center; gap:11px; font-size:12px; }
+  .alloc-dot { width:10px; height:10px; border-radius:3px; }
+  .alloc-name { color:var(--text); }
+  .alloc-note { display:block; font-size:10px; color:var(--muted); margin-top:1px; }
+  .alloc-pct { text-align:right; font-family:var(--font-mono); font-variant-numeric:tabular-nums; }
+
+  .rec-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:12px; }
+  .rec { background:var(--bg3); border-radius:10px; padding:14px 16px; }
+  .rec-label { font-size:9px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin-bottom:6px; }
+  .rec-value { font-family:var(--font-display); font-weight:700; font-size:14px; margin-bottom:5px; }
+  .rec-body { font-size:11px; color:var(--muted); line-height:1.6; }
+
+  .flags { display:flex; flex-direction:column; gap:10px; }
+  .flag { display:flex; gap:12px; background:var(--bg3); border-radius:8px; padding:12px 14px; }
+  .flag-stripe { width:3px; align-self:stretch; border-radius:2px; flex-shrink:0; background:var(--border); }
+  .flag--warn .flag-stripe { background:var(--amber); }
+  .flag--info .flag-stripe { background:var(--accent); }
+  .flag--good .flag-stripe { background:var(--green); }
+  .flag-title { font-family:var(--font-display); font-weight:700; font-size:12px; }
+  .flag-body { font-size:11px; color:var(--muted); line-height:1.55; margin-top:2px; }
+
+  ul.checklist { list-style:none; display:flex; flex-direction:column; gap:9px; }
+  ul.checklist li { display:flex; gap:9px; font-size:11.5px; color:var(--muted); line-height:1.6; }
+  ul.checklist li::before { content:'—'; color:var(--accent); flex-shrink:0; }
+
+  .disclaimer { border-left:2px solid var(--amber); background:color-mix(in srgb, var(--amber) 7%, transparent); border-radius:0 8px 8px 0; padding:13px 16px; font-size:11px; color:var(--muted); line-height:1.65; }
+  .disclaimer strong { color:var(--text); }
+  footer { text-align:center; font-size:10px; color:var(--dim); margin-top:26px; }
+  @media (prefers-reduced-motion: reduce) { * { transition:none !important; animation:none !important; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="eyebrow">Sharpe · Portfolio Planner</div>
+    <h1>What kind of portfolio fits you?</h1>
+    <p class="lede">Five questions about your situation — not your holdings. The result is a broad framework: how much belongs in equities versus bonds and cash, how wide to spread it, how many holdings to run, and how often to touch it. It never looks at your DEGIRO account and never names a product to buy.</p>
+  </header>
+
+  <div class="card" id="surveyCard">
+    <div class="card-title">Your situation</div>
+    <div class="card-sub">Everything stays on this device.</div>
+    <div class="sliders" id="sliders"></div>
+    <button class="btn-primary" id="btnBuild">Build my framework</button>
+  </div>
+
+  <div id="results">
+    <div class="card">
+      <div class="card-title">Your profile</div>
+      <div class="card-sub">A plain-language read of your five answers</div>
+      <p class="profile-line" id="profileLine"></p>
+      <div class="card-title" style="margin-bottom:10px">Broad allocation</div>
+      <div class="alloc-bar" id="allocBar"></div>
+      <div class="alloc-rows" id="allocRows"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">What to build</div>
+      <div class="card-sub">Scope, lifespan, structure and rhythm implied by your answers</div>
+      <div class="rec-grid" id="recGrid"></div>
+    </div>
+
+    <div class="card" id="flagsCard">
+      <div class="card-title">Worth thinking about</div>
+      <div class="card-sub">Tensions and confirmations between your own answers</div>
+      <div class="flags" id="flags"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Before you buy anything</div>
+      <div class="card-sub">Questions worth answering for yourself first</div>
+      <ul class="checklist" id="checklist"></ul>
+    </div>
+
+    <div class="card">
+      <p class="disclaimer">
+        <strong>This is an educational framework, not investment advice.</strong>
+        It is generated entirely from the five sliders above by fixed rules — it knows nothing
+        about your income, debts, tax situation, pension, dependants or country, all of which
+        change the right answer. It deliberately names no products, funds or tickers.
+        Sharpe is not a licensed financial adviser; for guidance on your actual circumstances,
+        speak to a regulated professional. Past performance never guarantees future results,
+        and every allocation shown here can lose money.
+      </p>
+      <div style="display:flex;gap:10px;justify-content:center;margin-top:16px">
+        <button class="btn-ghost" id="btnRedo">Adjust my answers</button>
+        <button class="btn-ghost" id="btnPrint">Save as PDF</button>
+      </div>
+    </div>
+  </div>
+
+  <footer>Sharpe · runs locally · not affiliated with DEGIRO or flatexDEGIRO Bank AG</footer>
+</div>
+
+<script>
+'use strict';
+
+// ── Questions ────────────────────────────────────────────────────────────────
+// Same five dimensions (and wording) as the extension's Rate My Portfolio survey,
+// so answers mean the same thing in both places.
+const QUESTIONS = [
+  { key:'risk',        label:'Risk Tolerance',        low:'Conservative',      high:'Aggressive' },
+  { key:'involvement', label:'Involvement',           low:'Passive investor',  high:'Active day trader' },
+  { key:'goal',        label:'Investment Goal',       low:'Steady income',     high:'Long-term wealth' },
+  { key:'horizon',     label:'Time Horizon',          low:'Under 1 year',      high:'30+ years' },
+  { key:'complexity',  label:'Complexity Preference', low:'Keep it simple',    high:'Fine with complexity' },
+];
+
+const DESCS = {
+  risk: {
+    1:'Capital preservation is your top priority', 2:'Very conservative — bonds, metals, money market',
+    3:'Conservative — mostly large-cap funds and ETFs', 4:'Moderately conservative — blue-chip equities with some bonds',
+    5:'Balanced — mix of equities and defensive assets', 6:'Moderate growth — mostly equities, some sector bets',
+    7:'Growth-oriented — individual stocks across sectors', 8:'Aggressive — small-caps, high-growth, concentrated positions',
+    9:'Very aggressive — leveraged products, high volatility', 10:'Maximum risk — derivatives, options, speculative plays',
+  },
+  involvement: {
+    1:'Buy once, check yearly', 2:'Review a couple of times a year', 3:'Check in quarterly, occasional rebalance',
+    4:'Monthly reviews, occasional trades', 5:'Regular monitoring, a few trades per month',
+    6:'Active — weekly reviews, frequent trades', 7:'Hands-on — multiple trades per week',
+    8:'Very active — daily monitoring and trading', 9:'Near day-trading — multiple trades daily', 10:'Full-time day trader',
+  },
+  goal: {
+    1:'Need regular income from my portfolio now', 2:'Primarily seeking steady dividend income',
+    3:'Income-focused with some growth', 4:'Balanced — income and moderate growth',
+    5:'Leaning toward growth with some income', 6:'Growth-focused, dividends are a bonus',
+    7:'Primarily capital appreciation', 8:'Aggressive growth over income',
+    9:'Maximum long-term capital gains', 10:'Pure wealth accumulation, no income needed',
+  },
+  horizon: {
+    1:'Need access to funds within 1 year', 2:'1–2 year horizon', 3:'2–3 years', 4:'3–5 years', 5:'5–7 years',
+    6:'7–10 years', 7:'10–15 years', 8:'15–20 years', 9:'20–30 years', 10:'30+ years — multi-generational wealth',
+  },
+  complexity: {
+    1:'One or two broad index funds, nothing more', 2:'A handful of ETFs, fully passive',
+    3:'A few funds/ETFs, maybe one individual stock', 4:'Mix of ETFs and some individual stocks',
+    5:'Comfortable with 10–15 positions', 6:'Fine managing diverse holdings',
+    7:'Multiple asset classes and geographies', 8:'Comfortable with options or leveraged products',
+    9:'Complex portfolio with many instruments', 10:'Any instrument, any market, any complexity',
+  },
+};
+
+const HORIZON_YEARS = {1:'under a year',2:'1–2 years',3:'2–3 years',4:'3–5 years',5:'5–7 years',
+  6:'7–10 years',7:'10–15 years',8:'15–20 years',9:'20–30 years',10:'30+ years'};
+
+// ── Allocation engine ────────────────────────────────────────────────────────
+// Horizon sets the ceiling on growth assets — money you need soon has no business
+// riding out a drawdown, however much volatility you say you can stomach. Risk
+// tolerance then decides how much of that ceiling you actually use.
+const EQUITY_CEILING = {1:10,2:20,3:35,4:50,5:60,6:70,7:80,8:85,9:90,10:95};
+// Cash is sized by how soon the money is needed, not by appetite.
+const CASH_TARGET    = {1:60,2:40,3:25,4:15,5:10,6:8,7:6,8:5,9:4,10:3};
+
+function computeAllocation(a) {
+  const ceiling = EQUITY_CEILING[a.horizon];
+  const riskFactor = Math.min(1, 0.55 + (a.risk - 1) * 0.05); // risk 1 → 55% of ceiling, risk 10 → 100%
+  let equity = Math.round(ceiling * riskFactor);
+  let cash = CASH_TARGET[a.horizon];
+  let bonds = 100 - equity - cash;
+  if (bonds < 0) { cash = Math.max(0, cash + bonds); bonds = 0; }
+  const drift = 100 - (equity + bonds + cash);
+  bonds += drift;                       // absorb rounding so the three always total 100
+  if (bonds < 0) { equity += bonds; bonds = 0; }
+  return { equity, bonds, cash };
+}
+
+function scopeFor(a) {
+  const c = a.complexity;
+  if (c <= 2) return { value:'One global fund', body:'A single broadly diversified world equity fund already holds thousands of companies across dozens of countries. Paired with one bond fund, that is a complete portfolio — the simplest thing that works, and the easiest to keep.' };
+  if (c <= 4) return { value:'Two or three sleeves', body:'A global equity core, optionally split so you control developed versus emerging weightings, plus one bond sleeve. Enough structure to express a view, few enough parts to rebalance in minutes.' };
+  if (c <= 6) return { value:'Core plus satellites', body:'A large global core doing the heavy lifting, with a few deliberate satellites — a region, sector or theme you have a reasoned view on. Keep satellites small enough that being wrong is survivable.' };
+  if (c <= 8) return { value:'Multi-sleeve, multi-asset', body:'Global core plus separate sleeves for regions, size or style tilts, property and bonds. Each sleeve needs its own rationale; if you cannot say what a sleeve is for, it is decoration.' };
+  return { value:'Wide, with real overhead', body:'You are comfortable across many instruments and markets. Worth being honest that every extra sleeve adds cost, tax paperwork and rebalancing work — and evidence that added complexity improves outcomes is thin.' };
+}
+
+function structureFor(a) {
+  const c = a.complexity;
+  if (c <= 2) return { value:'1–2 holdings',  body:'Two lines on a statement. Nothing to reconcile, nothing to forget.' };
+  if (c <= 4) return { value:'2–4 holdings',  body:'Still trivial to rebalance by hand once or twice a year.' };
+  if (c <= 6) return { value:'5–10 holdings', body:'Around the point where each position should have a stated purpose you can write in one sentence.' };
+  if (c <= 8) return { value:'10–20 holdings',body:'Diversification largely plateaus here. Beyond it you mostly add admin, not resilience.' };
+  return { value:'20+ holdings', body:'Watch for accidental overlap — several broad funds often hold the same large companies, so 25 lines can be far less diversified than it looks.' };
+}
+
+function cadenceFor(a) {
+  const i = a.involvement;
+  if (i <= 2) return { value:'Review yearly',    body:'Automate contributions, rebalance on a date you pick in advance, and otherwise leave it alone. This is a feature, not laziness.' };
+  if (i <= 4) return { value:'Review quarterly', body:'Check drift against your targets; only trade when something has moved meaningfully off target, say five percentage points.' };
+  if (i <= 6) return { value:'Review monthly',   body:'Frequent enough to stay informed, slow enough to avoid reacting to noise. Decide your rebalancing rule before you look, not after.' };
+  if (i <= 8) return { value:'Weekly, with rules',body:'At this frequency costs and taxes start to matter more than most people expect. Write your entry and exit rules down, and keep a satellite budget you are willing to lose.' };
+  return { value:'Daily — count the cost',       body:'Trading this often, spreads, commissions, FX conversion and tax become a large, certain drag against an uncertain edge. If you do it, ring-fence it from your core and measure it honestly against a simple index.' };
+}
+
+function tiltFor(a) {
+  const g = a.goal;
+  if (g <= 3) return { value:'Income orientation', body:'Weighted toward assets that pay out — dividend-oriented equity funds and bonds with maturities matched to when you need the money. Remember a withdrawal and a dividend spend the same; total return is what actually funds you.' };
+  if (g <= 6) return { value:'Balanced total return', body:'No need to choose. Judge the portfolio on total return — price growth plus income — and take cash from whichever part has run ahead when you rebalance.' };
+  return { value:'Accumulation', body:'You need no income now, so distributions are mostly friction. Accumulating fund share classes reinvest internally and reduce paperwork — though the tax treatment depends entirely on where you live, so check your own rules.' };
+}
+
+function lifespanFor(a) {
+  const h = a.horizon;
+  const years = HORIZON_YEARS[h];
+  if (h <= 2) return { value:'Too soon for markets', body:`With a ${years} horizon, the money you have an actual date for belongs in deposits, money-market funds or short-dated bonds — a bad year has no time to recover. The small growth slice below is only appropriate for whatever you will not need on that date.` };
+  if (h <= 4) return { value:`Short — ${years}`, body:'A meaningful drawdown may not repair itself in time. Keep growth assets modest and hold the portion you have a date for in something stable.' };
+  if (h <= 6) return { value:`Medium — ${years}`, body:'Long enough for equities to do real work, short enough that sequence matters. Glide the risky share down as the date you need the money approaches.' };
+  if (h <= 8) return { value:`Long — ${years}`, body:'Time is your biggest structural advantage. Volatility becomes something to sit through rather than avoid; the main risk shifts to being too defensive.' };
+  return { value:`Very long — ${years}`, body:'Over decades, inflation is the risk that compounds hardest against you. Cash feels safe and is guaranteed to lose purchasing power; a high growth share is the point.' };
+}
+
+// Cross-checks between answers — where the real value is, because these are the
+// tensions people do not notice in their own thinking.
+function flagsFor(a) {
+  const f = [];
+  if (a.risk >= 8 && a.horizon <= 3)
+    f.push({ sev:'warn', title:'Your appetite and your deadline disagree', body:`You describe an aggressive appetite but need the money within ${HORIZON_YEARS[a.horizon]}. Risk tolerance is about sleeping at night; capacity is about arithmetic. When they conflict, the deadline should win.` });
+  if (a.risk <= 3 && a.horizon >= 9)
+    f.push({ sev:'warn', title:'Very defensive over a very long horizon', body:'Holding mostly cash and bonds for 20+ years converts a volatility risk you can wait out into an inflation risk you cannot. Worth asking whether the caution is about the money or about watching the numbers move.' });
+  if (a.complexity >= 8 && a.involvement <= 3)
+    f.push({ sev:'warn', title:'A complex portfolio you plan to ignore', body:'Many instruments plus rare reviews is how portfolios drift far from their intended shape. Either simplify the structure or commit to the maintenance it needs.' });
+  if (a.involvement >= 7 && a.complexity <= 3)
+    f.push({ sev:'info', title:'High activity, simple holdings', body:'Trading frequently in a two-fund portfolio usually means trading the same broad market back and forth. If the activity is the enjoyable part, a small ring-fenced satellite scratches that itch without risking the core.' });
+  if (a.goal <= 3 && a.horizon >= 8)
+    f.push({ sev:'info', title:'Income focus with decades to run', body:'If you do not need the cash yet, income you spend is growth you gave up. Reinvesting during accumulation and switching to income closer to the date is usually the stronger sequence.' });
+  if (a.involvement >= 8)
+    f.push({ sev:'warn', title:'Costs scale with activity, returns do not', body:'At daily frequency, commissions, spreads and FX conversion are a guaranteed cost against an uncertain benefit. Benchmark this honestly against simply holding a broad index — Sharpe can show you that comparison.' });
+  if (a.risk <= 4 && a.complexity >= 8)
+    f.push({ sev:'info', title:'Cautious, but drawn to complex instruments', body:'Options and leveraged products are usually risk amplifiers, not risk reducers. If the appeal is control rather than return, plain bonds and cash do that job more reliably.' });
+  if (a.horizon >= 7 && a.risk >= 6 && a.complexity <= 4 && a.involvement <= 4)
+    f.push({ sev:'good', title:'Coherent and low-maintenance', body:'Long horizon, real growth appetite, few holdings, rare intervention. This is the boring combination that historically has been very hard to beat.' });
+  if (a.goal >= 7 && a.horizon <= 3)
+    f.push({ sev:'warn', title:'Maximum growth on a short clock', body:`Pure accumulation goals need time to work. Over ${HORIZON_YEARS[a.horizon]} the outcome is closer to a coin flip than to compounding.` });
+  if (!f.length)
+    f.push({ sev:'good', title:'Your answers are internally consistent', body:'No obvious contradictions between your appetite, horizon, goal and how involved you want to be. The framework below follows directly from them.' });
+  const rank = { warn:0, info:1, good:2 };
+  return f.sort((x,y) => rank[x.sev] - rank[y.sev]).slice(0, 5);
+}
+
+const CHECKLIST = [
+  'Do you hold enough accessible cash for an emergency — typically several months of essential spending — outside this portfolio entirely?',
+  'Are any high-interest debts cleared? Paying down expensive debt is a guaranteed return that most portfolios cannot match.',
+  'What is the total ongoing cost of what you plan to buy, and what does that compound to over your horizon?',
+  'How are these holdings taxed where you live — on dividends, on gains, on the account wrapper itself?',
+  'Written down in advance: at what drift do you rebalance, and what would make you sell? Decide while calm, not mid-drawdown.',
+  'If this portfolio fell by a third next year, would your plan still make sense — and would you still hold it?',
+];
+
+// ── Rendering ────────────────────────────────────────────────────────────────
+const STORE_KEY = 'sharpePlannerAnswers';
+const el = id => document.getElementById(id);
+
+function buildSliders() {
+  const saved = loadAnswers();
+  el('sliders').innerHTML = QUESTIONS.map(q => `
+    <div class="slider-row">
+      <div class="slider-head">
+        <span class="slider-label">${q.label}</span>
+        <span class="slider-value" id="val_${q.key}">5</span>
+      </div>
+      <div class="slider-anchors"><span>${q.low}</span><span>${q.high}</span></div>
+      <input type="range" min="1" max="10" step="1" value="5" id="in_${q.key}"
+             aria-label="${q.label}" aria-describedby="desc_${q.key}">
+      <div class="slider-desc" id="desc_${q.key}"></div>
+    </div>`).join('');
+
+  QUESTIONS.forEach(q => {
+    const input = el('in_' + q.key);
+    if (saved && saved[q.key]) input.value = saved[q.key];
+    const sync = () => {
+      const v = parseInt(input.value, 10);
+      el('val_' + q.key).textContent = v;
+      el('desc_' + q.key).textContent = DESCS[q.key][v] || '';
+    };
+    input.addEventListener('input', sync);
+    sync();
+  });
+}
+
+function readAnswers() {
+  const a = {};
+  QUESTIONS.forEach(q => { a[q.key] = parseInt(el('in_' + q.key).value, 10); });
+  return a;
+}
+
+function saveAnswers(a) { try { localStorage.setItem(STORE_KEY, JSON.stringify(a)); } catch (_) {} }
+function loadAnswers()  { try { return JSON.parse(localStorage.getItem(STORE_KEY) || 'null'); } catch (_) { return null; } }
+
+function render(a) {
+  const alloc = computeAllocation(a);
+
+  // Rendered as labelled rows rather than one spliced sentence: the source
+  // descriptions contain acronyms and em-dash clauses that break when forced
+  // into prose ("a handful of etfs").
+  el('profileLine').innerHTML = [
+    ['Risk',       DESCS.risk[a.risk]],
+    ['Horizon',    HORIZON_YEARS[a.horizon]],
+    ['Goal',       DESCS.goal[a.goal]],
+    ['Involvement',DESCS.involvement[a.involvement]],
+    ['Complexity', DESCS.complexity[a.complexity]],
+  ].map(([k, v]) => `<span class="prof-row"><span class="prof-key">${k}</span><strong>${v}</strong></span>`).join('');
+
+  const parts = [
+    { name:'Growth assets', note:'Broad global equity — the engine, and the part that falls hardest', pct:alloc.equity, color:'var(--green)' },
+    { name:'Defensive assets', note:'Bonds — ballast that cushions the equity ride', pct:alloc.bonds,  color:'var(--accent)' },
+    { name:'Cash & near-cash', note:'Deposits and money-market — money you may need soon', pct:alloc.cash, color:'var(--violet)' },
+  ].filter(p => p.pct > 0);
+
+  el('allocBar').innerHTML = parts.map(p =>
+    `<span class="alloc-seg" style="width:${p.pct}%;background:${p.color}" title="${p.name} ${p.pct}%">${p.pct >= 12 ? p.pct + '%' : ''}</span>`).join('');
+
+  el('allocRows').innerHTML = parts.map(p => `
+    <div class="alloc-row">
+      <span class="alloc-dot" style="background:${p.color}"></span>
+      <span class="alloc-name">${p.name}<span class="alloc-note">${p.note}</span></span>
+      <span class="alloc-pct">${p.pct}%</span>
+    </div>`).join('');
+
+  const recs = [
+    ['Scope',            scopeFor(a)],
+    ['Lifespan',         lifespanFor(a)],
+    ['Structure',        structureFor(a)],
+    ['Rhythm',           cadenceFor(a)],
+    ['Income vs growth', tiltFor(a)],
+  ];
+  el('recGrid').innerHTML = recs.map(([label, r]) => `
+    <div class="rec">
+      <div class="rec-label">${label}</div>
+      <div class="rec-value">${r.value}</div>
+      <div class="rec-body">${r.body}</div>
+    </div>`).join('');
+
+  el('flags').innerHTML = flagsFor(a).map(f => `
+    <div class="flag flag--${f.sev}">
+      <div class="flag-stripe"></div>
+      <div><div class="flag-title">${f.title}</div><div class="flag-body">${f.body}</div></div>
+    </div>`).join('');
+
+  el('checklist').innerHTML = CHECKLIST.map(c => `<li>${c}</li>`).join('');
+
+  el('results').style.display = 'block';
+  el('results').scrollIntoView({ behavior:'smooth', block:'start' });
+}
+
+el('btnBuild').addEventListener('click', () => {
+  const a = readAnswers();
+  saveAnswers(a);
+  render(a);
+});
+el('btnRedo').addEventListener('click', () => {
+  el('results').style.display = 'none';
+  el('surveyCard').scrollIntoView({ behavior:'smooth', block:'start' });
+});
+el('btnPrint').addEventListener('click', () => window.print());
+
+buildSliders();
+</script>
+</body>
+</html>

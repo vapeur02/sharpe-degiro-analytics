@@ -8,7 +8,14 @@ let popupState = {
 };
 
 document.addEventListener('DOMContentLoaded', async () => {
+  await initTheme();
   setupTabs();
+
+  document.getElementById('btnTheme').addEventListener('click', () => {
+    const next = getTheme() === 'light' ? 'dark' : 'light';
+    applyTheme(next);
+    if (window._popupData) renderDashboard(window._popupData);
+  });
 
   document.getElementById('btnRefresh').addEventListener('click', async () => {
     const btn = document.getElementById('btnRefresh');
@@ -138,6 +145,7 @@ async function checkPortfolioTab() {
 }
 
 function renderDashboard(data) {
+  window._popupData = data;
   const { meta } = extractProductMeta(data.productInfo);
   const transactions = extractTransactions(data.transactions);
   const positions    = extractPositions(data.portfolio, meta, transactions);
@@ -146,10 +154,15 @@ function renderDashboard(data) {
   showScreen('dashboard');
   setStatus('connected');
 
+  // FIFO-walk the transaction history once and share it — both the Closed
+  // list and the Insights stats need the same result.
+  const names  = Object.fromEntries(Object.entries(meta).map(([id, m]) => [id, m.name]));
+  const closed = computeClosedPositions(transactions, names, meta);
+
   renderSummary(positions, dividends, data);
   renderOpenPositions(positions);
-  renderClosedPositions(transactions, meta);
-  renderInsights(positions, dividends, transactions, meta);
+  renderClosedPositions(closed);
+  renderInsights(positions, dividends, transactions, closed);
 
   if (positions.length > 0) {
     renderAllocationChart(positions, 'holdings');
@@ -367,8 +380,8 @@ function drawTwrChart(period) {
       labels: sliced.map(d => fmtDate(d.date)),
       datasets: [{
         data: barData,
-        backgroundColor: barData.map(v => v >= 0 ? '#2ACA6933' : '#FF475733'),
-        borderColor:     barData.map(v => v >= 0 ? '#2ACA6999' : '#FF475799'),
+        backgroundColor: barData.map(v => v >= 0 ? THEME_COLORS.plGreenAlpha(0.2) : THEME_COLORS.plRedAlpha(0.2)),
+        borderColor:     barData.map(v => v >= 0 ? THEME_COLORS.plGreenAlpha(0.6) : THEME_COLORS.plRedAlpha(0.6)),
         borderWidth: 0,
         borderRadius: 0,
         barPercentage: 1.0,
@@ -383,8 +396,7 @@ function drawTwrChart(period) {
       plugins: {
         legend: { display: false },
         tooltip: {
-          backgroundColor: '#1E2C3A', borderColor: '#2A3A4A', borderWidth: 1,
-          titleColor: '#F5F7FA', bodyColor: '#8B9BB4', padding: 10,
+          ...THEME_COLORS.themeTooltip(),
           callbacks: {
             title: ctx => {
               const raw = sliced[ctx[0].dataIndex]?.date;
@@ -397,10 +409,10 @@ function drawTwrChart(period) {
         }
       },
       scales: {
-        x: { grid: { color: '#1E2C3A' }, ticks: { color: '#8B9BB4', font: { size: 9 }, maxTicksLimit: 8 } },
+        x: { grid: { color: THEME_COLORS.gridColor }, ticks: { color: THEME_COLORS.tickColor, font: { size: 9 }, maxTicksLimit: 8 } },
         y: {
-          grid: { color: '#1E2C3A88' },
-          ticks: { color: '#8B9BB4', font: { size: 9 }, callback: v => (v >= 0 ? '+' : '') + v.toFixed(0) + '%' },
+          grid: { color: THEME_COLORS.gridColor },
+          ticks: { color: THEME_COLORS.tickColor, font: { size: 9 }, callback: v => (v >= 0 ? '+' : '') + v.toFixed(0) + '%' },
           beginAtZero: false
         }
       }
@@ -474,10 +486,7 @@ function renderOpenPositions(positions) {
 
 // ── Closed Positions (FIFO) ──────────────────────────────────────────
 
-function renderClosedPositions(transactions, meta) {
-  const names = {};
-  Object.entries(meta).forEach(([id, m]) => { names[id] = m.name; });
-  const closed = computeClosedPositions(transactions, names, meta);
+function renderClosedPositions(closed) {
 
   const c = document.getElementById('positionsListClosed');
   c.textContent = '';
@@ -499,7 +508,7 @@ function renderClosedPositions(transactions, meta) {
 
     const dot = document.createElement('div');
     dot.className = 'position-dot';
-    dot.style.background = p.realizedPL >= 0 ? '#2ACA69' : '#FF4757';
+    dot.style.background = p.realizedPL >= 0 ? THEME_COLORS.plGreen : THEME_COLORS.plRed;
 
     const left = document.createElement('div');
     left.className = 'position-left';
@@ -513,7 +522,7 @@ function renderClosedPositions(transactions, meta) {
     if (p.isPartial) {
       const badge = document.createElement('span');
       badge.textContent = 'PARTIAL';
-      badge.style.cssText = 'font-size:9px;font-weight:700;letter-spacing:0.05em;color:#00A8E1;margin-right:5px';
+      badge.style.cssText = 'font-size:9px;font-weight:700;letter-spacing:0.05em;color:var(--accent);margin-right:5px';
       metaEl.appendChild(badge);
     }
     const qty = document.createElement('span');
@@ -549,32 +558,19 @@ function renderClosedPositions(transactions, meta) {
 
 // ── More Insights ────────────────────────────────────────────────────
 
-function renderInsights(positions, dividends, transactions, meta) {
+function renderInsights(positions, dividends, transactions, closedForFx) {
   const grid = document.getElementById('insightsGrid');
   if (!grid) return;
   grid.textContent = '';
 
   // 1. Dividends
-  const totalDividends = dividends.reduce((s, d) => s + (d.amountEUR || 0), 0);
+  const totalDividends = sumDividends(dividends);
 
-  // 2. FX P&L — unrealized (open positions) + realized (sold lots)
-  let unrealizedFxPL = 0, fxPositions = 0;
-  positions.forEach(p => {
-    if (p.currency === 'EUR') return;
-    unrealizedFxPL += p.plFx || 0;
-    fxPositions++;
-  });
-  // Realized FX from closed/partially closed positions
-  const names = Object.fromEntries(Object.entries(meta).map(([id, m]) => [id, m.name]));
-  const closedForFx = computeClosedPositions(transactions, names, meta);
-  let realizedFxPL = 0, closedFxCount = 0;
-  closedForFx.forEach(cp => {
-    if (cp.realizedFxPL) { realizedFxPL += cp.realizedFxPL; closedFxCount++; }
-  });
-  const totalFxPL = unrealizedFxPL + realizedFxPL;
-
-  // 3. Realized gains — use computeClosedPositions (canonical FIFO) for consistency with dashboard
-  const totalRealized = closedForFx.reduce((s, cp) => s + cp.realizedPL, 0);
+  // 2 & 3. FX effect + realized gains — same utils.js helpers the dashboard
+  // uses, so the popup can never report a different figure.
+  const { unrealizedFxPL, realizedFxPL, totalFxPL, fxPositions, closedFxCount } =
+    computeFxEffect(positions, closedForFx);
+  const totalRealized = sumRealized(closedForFx);
 
   const makeCard = (label, value, sub, colorClass, tooltip) => {
     const card = document.createElement('div');
@@ -697,14 +693,14 @@ function renderAllocationChart(positions, mode) {
   legendEl.textContent = '';
   sorted.forEach(([label, value], i) => {
     const row = document.createElement('div');
-    row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:3px 0;font-size:11px;color:#8B9BB4';
+    row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:3px 0;font-size:11px;color:var(--text-muted)';
     const dot = document.createElement('span');
     dot.style.cssText = `display:inline-block;width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${COLORS[i % COLORS.length]}`;
     const name = document.createElement('span');
     name.style.cssText = 'flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
     name.textContent = label;
     const pct = document.createElement('span');
-    pct.style.cssText = 'flex-shrink:0;font-size:10px;color:#8B9BB4';
+    pct.style.cssText = 'flex-shrink:0;font-size:10px;color:var(--text-muted)';
     pct.textContent = ((value / total) * 100).toFixed(1) + '%';
     row.append(dot, name, pct);
     legendEl.appendChild(row);
@@ -715,13 +711,13 @@ function renderAllocationChart(positions, mode) {
     type: 'doughnut',
     data: {
       labels: sorted.map(([k]) => k),
-      datasets: [{ data: sorted.map(([, v]) => v), backgroundColor: COLORS, borderColor: '#0A111A', borderWidth: 2 }]
+      datasets: [{ data: sorted.map(([, v]) => v), backgroundColor: COLORS, borderColor: THEME_COLORS.pieBorderColor, borderWidth: 2 }]
     },
     options: {
       responsive: true, maintainAspectRatio: false, cutout: '62%',
       plugins: {
         legend: { display: false },
-        tooltip: { backgroundColor: '#1E2C3A', borderColor: '#2A3A4A', borderWidth: 1,
+        tooltip: { ...THEME_COLORS.themeTooltip(),
           callbacks: { label: ctx => ' ' + ctx.label + ': ' + ((ctx.parsed / total) * 100).toFixed(1) + '% · ' + fmtEur(ctx.parsed) } }
       }
     }

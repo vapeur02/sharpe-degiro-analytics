@@ -3,7 +3,7 @@
 
   "manifest_version": 3,
   "name": "Sharpe: Portfolio Analytics for DEGIRO",
-  "version": "1.5",
+  "version": "1.7.0",
   "description": "Upgrade DEGIRO with a secure, local dashboard offering advanced return tracking, risk grading, and deep insights.",
   "permissions": ["storage", "unlimitedStorage", "windows", "tabs"],
   "host_permissions": [
@@ -72,7 +72,28 @@
   "web_accessible_resources": [
     {
       "resources": ["icons/icon16.png", "icons/icon32.png", "icons/icon48.png", "icons/icon128.png", "fonts/syne-latin-800-normal.woff2", "fonts/dm-mono-latin-400-normal.woff2"],
-      "matches": ["<all_urls>"]
+      "matches": [
+        "https://trader.degiro.nl/*",
+        "https://trader.degiro.ch/*",
+        "https://trader.degiro.co.uk/*",
+        "https://trader.degiro.ie/*",
+        "https://trader.degiro.fr/*",
+        "https://trader.degiro.de/*",
+        "https://trader.degiro.it/*",
+        "https://trader.degiro.es/*",
+        "https://trader.degiro.pl/*",
+        "https://trader.degiro.cz/*",
+        "https://trader.degiro.ro/*",
+        "https://trader.degiro.sk/*",
+        "https://trader.degiro.hu/*",
+        "https://trader.degiro.at/*",
+        "https://trader.degiro.se/*",
+        "https://trader.degiro.dk/*",
+        "https://trader.degiro.fi/*",
+        "https://trader.degiro.no/*",
+        "https://trader.degiro.pt/*",
+        "https://trader.degiro.gr/*"
+      ]
     }
   ],
   "icons": {

@@ -5,31 +5,41 @@
   <title>Sharpe — Dashboard</title>
   <script src="chart.min.js"></script>
   <link rel="stylesheet" href="dashboard.css">
+  <script src="theme-init.js"></script>
 </head>
 <body>
   <header class="header">
-    <div class="logo">
-      <img src="icons/icon48.png" class="logo-img" alt="Sharpe">
-      <span class="logo-text">Sharpe</span>
+    <div class="header-row">
+      <div class="logo">
+        <img src="icons/icon48.png" class="logo-img" alt="Sharpe">
+        <span class="logo-text">Sharpe</span>
+      </div>
+      <div class="header-center" id="headerStats"></div>
+      <div class="header-right">
+        <button class="btn-icon" id="btnTheme" title="Toggle light/dark mode">
+          <svg id="themeIcon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+          </svg>
+        </button>
+        <button class="btn-icon" id="btnPrivacy" title="Hide sensitive figures">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+            <circle cx="12" cy="12" r="3"/>
+          </svg>
+        </button>
+        <button class="btn-pro" id="btnPro" title="Sharpe Pro">PRO</button>
+        <button class="btn-refresh" id="btnRefresh">↻ Refresh<div class="status-dot" id="statusDot"></div></button>
+      </div>
     </div>
-    <div class="header-center" id="headerStats"></div>
-    <div class="header-right">
-      <button class="btn-icon" id="btnPrivacy" title="Hide sensitive figures">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
-          <circle cx="12" cy="12" r="3"/>
-        </svg>
-      </button>
-      <button class="btn-pro" id="btnPro" title="Sharpe Pro">PRO</button>
-      <button class="btn-refresh" id="btnRefresh">↻ Refresh<div class="status-dot" id="statusDot"></div></button>
-    </div>
+    <nav class="tab-bar" id="tabBar" style="display:none">
+      <button class="tab-btn" data-tab="today">Today</button>
+      <button class="tab-btn active" data-tab="portfolio">Portfolio</button>
+      <button class="tab-btn" data-tab="insights">Insights</button>
+      <button class="tab-btn" data-tab="watchlist">Watchlist</button>
+      <button class="tab-btn" data-tab="dividends">Dividends</button>
+      <button class="tab-btn" data-tab="tax">Tax Reporting</button>
+    </nav>
   </header>
-
-  <nav class="tab-bar" id="tabBar" style="display:none">
-    <button class="tab-btn active" data-tab="portfolio">Portfolio</button>
-    <button class="tab-btn" data-tab="insights">Insights</button>
-    <button class="tab-btn" data-tab="tax">Tax Reporting</button>
-  </nav>
 
   <div class="loading-screen" id="loadingScreen">
     <div class="loading-spinner"></div>
@@ -40,73 +50,160 @@
 
   <main class="main" id="mainContent" style="display:none">
     <div id="portfolioWarning" style="display:none" class="portfolio-warning">
-      ⚠ For live data, navigate to your <a href="https://trader.degiro.nl/trader/#/portfolio" target="_blank">DEGIRO Portfolio tab</a> and click Refresh.
+      <span id="portfolioWarningText"></span>
+      <button id="portfolioWarningBtn" class="banner-action-btn" type="button"></button>
+    </div>
+
+    <!-- ═══ Tab: Today ═══ -->
+    <div class="tab-pane" id="tabToday">
+      <div class="card card--full" id="todayStatsCard">
+        <div class="card-header">
+          <div class="card-title">Daily Stats</div>
+          <div class="today-header-actions">
+            <div class="today-status-inline" id="todayStatusInline"></div>
+            <div class="today-date-picker-wrap">
+              <button type="button" id="todayDateBtn" class="period-select today-date-btn" aria-haspopup="dialog" aria-expanded="false" title="Choose day"></button>
+              <div id="todayDatePopover" class="today-date-popover" hidden role="dialog" aria-label="Select date">
+                <div class="today-cal-head">
+                  <button type="button" class="today-cal-nav" id="todayCalPrev" aria-label="Previous month">‹</button>
+                  <div class="today-cal-title-row">
+                    <span id="todayCalMonthLabel" class="today-cal-month"></span>
+                    <select id="todayCalYearSelect" class="period-select today-cal-year-select" aria-label="Year"></select>
+                  </div>
+                  <button type="button" class="today-cal-nav" id="todayCalNext" aria-label="Next month">›</button>
+                </div>
+                <div class="today-cal-weekdays" aria-hidden="true">
+                  <span>Su</span><span>Mo</span><span>Tu</span><span>We</span><span>Th</span><span>Fr</span><span>Sa</span>
+                </div>
+                <div id="todayCalGrid" class="today-cal-grid"></div>
+              </div>
+            </div>
+            <button id="todayJumpNow" class="btn btn--sm" type="button" title="Jump to live today view">Today</button>
+          </div>
+        </div>
+        <div id="todayStatsContent"></div>
+
+        <!-- P&L timeline lives inside the card it describes rather than in a
+             separate card of its own -->
+        <div id="todaySparklineCard" class="today-spark-section" style="display:none">
+          <div class="today-spark-title">P&amp;L timeline · captured at each refresh</div>
+          <div class="chart-wrap" style="height:140px">
+            <canvas id="todaySparklineChart"></canvas>
+          </div>
+        </div>
+      </div>
+
+      <!-- One dataset, one card. Table / Waterfall / Heatmap are three
+           projections of the same `items` array, so they are view modes
+           rather than three stacked cards. -->
+      <div class="card card--full" id="todayMoversCard">
+        <div class="card-header">
+          <div class="card-title">Today's Movers</div>
+          <div class="today-total" id="todayTotal"></div>
+          <div class="seg" id="todayViewToggle">
+            <button class="seg-btn active" type="button" data-view="table">Table</button>
+            <button class="seg-btn" type="button" data-view="waterfall">Waterfall</button>
+            <button class="seg-btn" type="button" data-view="heatmap">Heatmap</button>
+          </div>
+          <select id="heatmapGroupBy" class="select" style="display:none" title="Group the heatmap">
+            <option value="none">No grouping</option>
+            <option value="assetclass">Asset Type</option>
+            <option value="geography">Geography</option>
+          </select>
+        </div>
+        <div id="todayViewBody">
+          <div id="todayTableContent" class="today-view" data-view="table">
+            <div class="table-scroll">
+              <table class="positions-table" id="todayTable" style="display:none">
+                <thead><tr>
+                  <th data-col="name">Name</th>
+                  <th data-col="price" class="num">Price</th>
+                  <th data-col="dayPct" class="num">Day %</th>
+                  <th data-col="dayEur" class="num">Day €</th>
+                  <th data-col="weight" class="num">Weight</th>
+                  <th data-col="contrib" class="num">Contrib.</th>
+                  <th data-col="totalPl" class="num">Total P&L</th>
+                  <th data-col="totalPlPct" class="num">Total %</th>
+                </tr></thead>
+                <tbody id="todayBody"></tbody>
+              </table>
+            </div>
+          </div>
+          <div id="todayWaterfallView" class="today-view" data-view="waterfall" style="display:none">
+            <div class="chart-wrap" style="height:300px">
+              <canvas id="todayWaterfallChart"></canvas>
+            </div>
+          </div>
+          <div id="todayHeatmapView" class="today-view" data-view="heatmap" style="display:none">
+            <div id="sectorHeatmapContent"></div>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- ═══ Tab: Portfolio ═══ -->
     <div class="tab-pane active" id="tabPortfolio">
       <div class="grid-top">
+        <!-- One performance story. "Cumulative" is the TWR line, "Daily" is the
+             per-day bar chart that used to live in its own Recent Activity card
+             below — same question, so one chart with two modes and one period. -->
         <div class="card card--wide">
           <div class="card-header">
-            <div class="card-title">Capital Appreciation</div>
+            <div class="card-title">Performance</div>
             <div class="card-subtitle" id="perfSubtitle"></div>
             <div class="perf-controls">
-              <select id="periodSelect" class="period-select">
-                <option value="6M">6M</option>
-                <option value="1Y" selected>1Y</option>
-                <option value="2Y">2Y</option>
-                <option value="3Y">3Y</option>
-                <option value="5Y">5Y</option>
-                <option value="ALL">All time</option>
-              </select>
-              <div class="alloc-toggle" id="perfToggle">
-                <button class="toggle-btn active" data-mode="pct">% Return</button>
-                <button class="toggle-btn" data-mode="eur">€ Value</button>
+              <div class="alloc-toggle" id="perfModeToggle">
+                <button class="toggle-btn active" type="button" data-perfmode="cum">Cumulative</button>
+                <button class="toggle-btn" type="button" data-perfmode="daily">Daily</button>
               </div>
-              <button class="toggle-btn" id="tradesToggle" title="Show buy/sell markers">⇅ Trades</button>
+              <div class="alloc-toggle" id="perfToggle">
+                <button class="toggle-btn active" type="button" data-mode="pct" title="Show return in %">%</button>
+                <button class="toggle-btn" type="button" data-mode="eur" title="Show value in €">€</button>
+              </div>
+              <select id="periodSelect" class="period-select" title="Chart window"></select>
+              <div class="bm-dropdown-wrap" id="bmDropdownWrap">
+                <button class="btn btn--sm" id="bmDropdownBtn" type="button" title="Benchmarks and trade markers">
+                  Overlays
+                  <svg viewBox="0 0 10 6" fill="currentColor"><path d="M0 0l5 6 5-6z"/></svg>
+                </button>
+                <div class="bm-dropdown-menu" id="bmDropdownMenu">
+                  <div class="bm-dropdown-item active" data-benchmark="sp500">
+                    <span class="bm-check"></span>
+                    <span class="bm-swatch" style="background:var(--bm-sp500)"></span>
+                    S&amp;P 500
+                  </div>
+                  <div class="bm-dropdown-item" data-benchmark="eurostoxx">
+                    <span class="bm-check"></span>
+                    <span class="bm-swatch" style="background:var(--bm-eurostoxx)"></span>
+                    Euro Stoxx 50
+                  </div>
+                  <div class="bm-dropdown-item" data-benchmark="nasdaq">
+                    <span class="bm-check"></span>
+                    <span class="bm-swatch" style="background:var(--bm-nasdaq)"></span>
+                    Nasdaq 100
+                  </div>
+                  <div class="bm-dropdown-sep"></div>
+                  <div class="bm-dropdown-item" data-overlay="trades">
+                    <span class="bm-check"></span>
+                    ⇅ Trade markers
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
-          <div class="chart-wrap"><canvas id="performanceChart"></canvas></div>
-          <div class="chart-insight-row">
-            <button class="btn-insight-toggle" id="insightToggle" title="Toggle chart insights">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M9 18h6M10 22h4M12 2a7 7 0 0 1 7 7c0 2.5-1.3 4.7-3.3 6L15 17H9l-.7-2C6.3 13.7 5 11.5 5 9a7 7 0 0 1 7-7z"/>
-              </svg>
-            </button>
-            <div id="chartInsight" class="chart-insight" style="display:none"></div>
+          <div class="chart-wrap perf-chart-wrap">
+            <canvas id="performanceChart"></canvas>
+            <button id="btnResetZoom" class="btn btn--sm chart-reset" type="button" style="display:none" title="Reset to selected period">✕ Reset zoom</button>
           </div>
+          <div class="perf-footline" id="perfFootline"></div>
         </div>
         <div class="card">
           <div class="card-header"><div class="card-title">Allocation</div></div>
-          <div class="chart-wrap"><canvas id="allocationChart"></canvas></div>
-          <div class="legend" id="allocationLegend"></div>
-        </div>
-      </div>
-
-      <div class="grid-bottom grid-bottom--2">
-      </div>
-
-      <div class="card card--full" id="moversCard">
-        <div class="card-header">
-          <div class="card-title">Recent Activity</div>
-          <div class="alloc-toggle" id="moversToggle">
-            <button class="toggle-btn" data-period="1W">1W</button>
-            <button class="toggle-btn active" data-period="1M">1M</button>
-            <button class="toggle-btn" data-period="6M">6M</button>
-            <button class="toggle-btn" data-period="1Y">1Y</button>
-          </div>
-        </div>
-        <div class="movers-row">
-          <div class="movers-col">
-            <div class="movers-col-title">Big Movers</div>
-            <div id="moversContent" class="movers-grid"></div>
-          </div>
-          <div class="movers-col movers-col--chart">
-            <div class="movers-col-title">Portfolio Performance</div>
-            <div class="chart-wrap chart-wrap--perf perf-chart-wrap">
-              <canvas id="recentPerfChart"></canvas>
-              <div class="perf-badge-tip" data-tip="Simple price return of your current holdings over the selected period. Excludes positions you've fully sold."></div>
-            </div>
+          <div class="alloc-viz" id="allocationChart">
+            <div class="alloc-stackbar" id="allocStackBar"></div>
+            <div class="alloc-drill-head" id="allocDrillHead" style="display:none"></div>
+            <div class="alloc-rows" id="allocationLegend"></div>
+            <div class="alloc-callout" id="allocCallout" style="display:none"></div>
           </div>
         </div>
       </div>
@@ -114,14 +211,19 @@
       <div class="card card--full">
         <div class="card-header">
           <div class="card-title">Positions</div>
+          <input type="search" id="positionsFilter" class="pos-filter" placeholder="Filter — press /" autocomplete="off">
           <div class="alloc-toggle" id="positionsTabToggle">
             <button class="toggle-btn active" data-tab="open">Open</button>
             <button class="toggle-btn" data-tab="closed">Closed</button>
           </div>
         </div>
+        <!-- Big Movers used to be six tiles on a card 567px above this table, and
+             clicking one only ever scrolled you down to these rows. Same click,
+             no journey. -->
+        <div class="movers-chips" id="moversChips"></div>
         <table class="positions-table" id="positionsTable">
           <thead><tr>
-            <th data-col="name">Name</th><th data-col="currency">Currency</th><th data-col="size">Shares</th><th data-col="price">Price</th><th data-col="value">Value</th><th data-col="pl">P&amp;L</th><th data-col="plpct">P&amp;L %</th><th data-col="attrib">Return<br>Contribution</th><th data-col="vol">Volatility</th>
+            <th data-col="name">Name</th><th data-col="weight">Weight</th><th data-col="spark">30D</th><th data-col="price">Price</th><th data-col="value">Value</th><th data-col="pl">P&amp;L</th><th data-col="plpct">P&amp;L %</th>
           </tr></thead>
           <tbody id="positionsBody"></tbody>
         </table>
@@ -131,20 +233,19 @@
           </tr></thead>
           <tbody id="closedPositionsBody"></tbody>
         </table>
-        <div id="stockChartContainer" class="stock-chart-container" style="display:none">
-          <div class="stock-chart-header">
-            <div class="stock-chart-title" id="stockChartTitle"></div>
-            <div class="stock-chart-meta" id="stockChartMeta"></div>
-            <button class="stock-chart-close" id="stockChartClose" title="Close chart">✕</button>
-          </div>
-          <div class="chart-wrap chart-wrap--stock"><canvas id="stockChart"></canvas></div>
-        </div>
       </div>
     </div>
 
     <!-- ═══ Tab: Insights ═══ -->
     <div class="tab-pane" id="tabInsights">
-      <div class="card card--full" id="moreInfoCard">
+      <!-- Pulse and the stat tiles used to be two cards restating each other.
+           One card now: the figures, then only the observations that no tile
+           already carries. -->
+      <div class="card card--full" id="pulseCard">
+        <div class="card-header">
+          <div class="card-title">Portfolio Pulse</div>
+          <div class="card-subtitle">Your all-time figures, and what stands out in them · not advice</div>
+        </div>
         <div id="moreInfoContent" class="more-info-content">
           <div class="more-info-grid" id="moreInfoGrid">
             <!-- Populated by JS -->
@@ -154,12 +255,14 @@
           </div>
           <div class="more-info-note" id="moreInfoNote"></div>
         </div>
+        <div id="pulseList" class="pulse-list"></div>
       </div>
 
-      <div class="card card--full insight-collapsible" id="portfolioGradeCard">
-        <div class="card-header">
+      <div class="card card--full insight-collapsible collapsed" id="portfolioGradeCard">
+        <div class="card-header insight-head" role="button" tabindex="0" aria-expanded="false">
           <div class="card-title">Rate My Portfolio</div>
-          <button class="toggle-btn insight-collapse-btn" title="Collapse">⊖ Collapse</button>
+          <div class="insight-summary" id="gradeSummary">5 quick questions · rate your portfolio against your goals</div>
+          <span class="insight-chevron" aria-hidden="true">▸</span>
         </div>
         <div class="insight-collapsible-body">
           <div id="gradeContent">
@@ -221,11 +324,11 @@
         </div>
       </div>
 
-      <div class="card card--full insight-collapsible" id="correlationCard">
-        <div class="card-header">
+      <div class="card card--full insight-collapsible collapsed" id="correlationCard">
+        <div class="card-header insight-head" role="button" tabindex="0" aria-expanded="false">
           <div class="card-title" id="corrInfoIcon">Correlation Matrix</div>
-          <div class="card-subtitle" id="correlationSubtitle">Pearson correlation of daily returns · all-time</div>
-          <button class="toggle-btn insight-collapse-btn" title="Collapse">⊖ Collapse</button>
+          <div class="insight-summary" id="correlationSubtitle">How closely your holdings move together</div>
+          <span class="insight-chevron" aria-hidden="true">▸</span>
         </div>
         <div class="insight-collapsible-body">
           <div id="correlationContent">
@@ -234,11 +337,11 @@
         </div>
       </div>
 
-      <div class="card card--full insight-collapsible" id="stressTestCard">
-        <div class="card-header">
+      <div class="card card--full insight-collapsible collapsed" id="stressTestCard">
+        <div class="card-header insight-head" role="button" tabindex="0" aria-expanded="false">
           <div class="card-title">Risk Analysis</div>
-          <div class="card-subtitle">Portfolio risk metrics and scenario stress tests</div>
-          <button class="toggle-btn insight-collapse-btn" title="Collapse">⊖ Collapse</button>
+          <div class="insight-summary" id="stressSummary">Value at Risk and scenario stress tests</div>
+          <span class="insight-chevron" aria-hidden="true">▸</span>
         </div>
         <div class="insight-collapsible-body">
           <div id="stressTestContent">
@@ -248,70 +351,109 @@
       </div>
     </div>
 
+    <!-- ═══ Tab: Watchlist ═══ -->
+    <div class="tab-pane" id="tabWatchlist">
+      <div id="watchlistEmpty" style="display:none"></div>
+      <div class="card card--full" id="watchlistChartCard">
+        <div class="card-header">
+          <div class="card-title">Watchlist Performance</div>
+          <div class="perf-controls">
+            <select id="watchlistPeriod" class="period-select" title="Applies to the chart and the table below">
+              <option value="1M">1M</option>
+              <option value="6M">6M</option>
+              <option value="YTD">YTD</option>
+              <option value="1Y" selected>1Y</option>
+              <option value="3Y">3Y</option>
+              <option value="5Y">5Y</option>
+            </select>
+          </div>
+        </div>
+        <div id="wlChartReturn" class="wl-chart-return"></div>
+        <div class="chart-wrap" style="height:300px">
+          <canvas id="watchlistChart"></canvas>
+        </div>
+        <div id="wlVsPortfolioStats" class="wl-comparison-stats" style="display:none"></div>
+      </div>
+      <div class="card card--full" id="watchlistTableCard">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Favourites</div>
+            <div class="card-subtitle" style="color:var(--muted);font-size:11px">Items you're watching on DEGIRO</div>
+          </div>
+        </div>
+        <div id="watchlistContent">
+          <div class="table-scroll">
+            <table class="positions-table" id="watchlistTable" style="display:none">
+              <thead><tr>
+                <th data-col="name">Name</th>
+                <th data-col="currency">Ccy</th>
+                <th data-col="price" class="num">Price</th>
+                <th data-col="ret" class="num">Return</th>
+                <th data-col="vol" class="num">Volatility</th>
+                <th data-col="corr" class="num">Corr.</th>
+                <th data-col="signal" class="num"><span class="th-with-tip" data-tip="Based on SMA(50) vs SMA(200) crossover. Bullish = short-term trend above long-term. Bearish = below. Neutral = within 1%.">Signal</span></th>
+              </tr></thead>
+              <tbody id="watchlistBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div class="card card--full" id="wlStockChartCard" style="display:none">
+        <div class="card-header">
+          <div class="card-title" id="wlStockTitle"></div>
+          <button class="btn-icon" id="wlStockClose" title="Close">&times;</button>
+        </div>
+        <div class="chart-wrap" style="height:260px">
+          <canvas id="wlStockChart"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══ Tab: Dividends ═══ -->
+    <div class="tab-pane" id="tabDividends">
+      <div id="dividendsEmpty" style="display:none"></div>
+      <div class="card card--full" id="divStatsCard">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Dividend Income</div>
+            <div class="card-subtitle" style="color:var(--muted);font-size:11px">Gross payments received · before withholding tax</div>
+          </div>
+        </div>
+        <div class="more-info-grid" id="divStatsGrid"></div>
+      </div>
+      <div class="card card--full" id="divChartCard">
+        <div class="card-header">
+          <div class="card-title">Monthly Dividends</div>
+          <div class="card-subtitle">Last 12 months</div>
+        </div>
+        <div class="chart-wrap" style="height:220px"><canvas id="dividendChart"></canvas></div>
+        <div id="divNextEstimate" class="div-next-estimate" style="display:none"></div>
+      </div>
+      <div class="card card--full" id="divHoldingsCard">
+        <div class="card-header">
+          <div class="card-title">Per-Holding Breakdown</div>
+        </div>
+        <div id="divHoldingsContent"></div>
+      </div>
+    </div>
+
     <!-- ═══ Tab: Tax Reporting ═══ -->
     <div class="tab-pane" id="tabTax">
-      <div class="tax-coming-soon">
-        <div class="tax-pro-lock">
-          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
-          </svg>
+      <div class="card card--full" id="taxReportCard">
+        <div class="card-header">
+          <div class="card-title">Tax Reporting</div>
+          <div class="card-subtitle">Generate tax tables from your DEGIRO history</div>
         </div>
-        <div class="tax-coming-soon-title">Tax Reporting — Coming Soon to Sharpe PRO</div>
-        <div class="tax-coming-soon-sub">Export tax tables from your DEGIRO transaction history.</div>
-
-        <div class="tax-countries-grid">
-
-          <div class="tax-country-card">
-            <div class="tax-country-info">
-              <div class="tax-country-name">Netherlands</div>
-              <div class="tax-country-forms">
-                <span class="tax-form-tag">IB-aangifte (Box 3)</span>
-                <span class="tax-form-tag">Aangifte inkomstenbelasting</span>
-              </div>
-            </div>
-          </div>
-
-          <div class="tax-country-card">
-            <div class="tax-country-info">
-              <div class="tax-country-name">France</div>
-              <div class="tax-country-forms">
-                <span class="tax-form-tag">Formulaire 2042</span>
-                <span class="tax-form-tag">Formulaire 2074</span>
-                <span class="tax-form-tag">PFU (Flat Tax 30%)</span>
-              </div>
-            </div>
-          </div>
-
-          <div class="tax-country-card">
-            <div class="tax-country-info">
-              <div class="tax-country-name">Germany</div>
-              <div class="tax-country-forms">
-                <span class="tax-form-tag">Anlage KAP</span>
-                <span class="tax-form-tag">Abgeltungsteuer (25%)</span>
-              </div>
-            </div>
-          </div>
-
-          <div class="tax-country-card">
-            <div class="tax-country-info">
-              <div class="tax-country-name">Belgium</div>
-              <div class="tax-country-forms">
-                <span class="tax-form-tag">Déclaration IPP / Aangifte PB</span>
-                <span class="tax-form-tag">Roerende voorheffing (30%)</span>
-              </div>
-            </div>
-          </div>
-
-        </div>
+        <div id="taxReportContent"></div>
       </div>
     </div>
 
   </main>
 
   <footer class="dashboard-footer">
-    <span>Not financial advice.</span>
-    <span>·</span>
-    <span><a href="mailto:philippe.veldkamp@gmail.com" class="footer-link">Feedback</a></span>
+    <span>Not financial advice</span>
+    <span> — </span>
+    <span><a href="https://docs.google.com/forms/d/e/1FAIpQLSdX4zvs9scwN4faCd2bnE-F4jqeqhIQ5IuJD7EUlNlaMYXDqg/viewform?usp=publish-editor" class="footer-link">Feedback</a></span>
   </footer>
 
   <script src="utils.js"></script>

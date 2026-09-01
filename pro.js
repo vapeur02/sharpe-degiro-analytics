@@ -3,7 +3,6 @@
 
 // ── Configuration ──────────────────────────────────────────────────────────
 const PRO_CONFIG = {
-  placeholderMode: true,
   storeSlug: 'sharpe',
   checkoutUrl: 'https://sharpe.lemonsqueezy.com/checkout/buy/ddba0155-f59f-4015-bfe7-43587a2d0143',
 
@@ -28,20 +27,17 @@ const PRO_CONFIG = {
 
 /**
  * Get the current Pro license state from chrome.storage.local.
- * Returns: { isPro, licenseKey, validatedAt, customerEmail, customerName, expiresAt }
+ * Returns: { isPro, licenseKey, validatedAt, expiresAt }
  */
 async function getProStatus() {
   return new Promise(resolve => {
     chrome.storage.local.get(
-      ['pro_isPro', 'pro_licenseKey', 'pro_validatedAt', 'pro_customerEmail',
-       'pro_customerName', 'pro_expiresAt'],
+      ['pro_isPro', 'pro_licenseKey', 'pro_validatedAt', 'pro_expiresAt'],
       (result) => {
         resolve({
           isPro:         result.pro_isPro === true,
           licenseKey:    result.pro_licenseKey  || '',
           validatedAt:   result.pro_validatedAt || 0,
-          customerEmail: result.pro_customerEmail || '',
-          customerName:  result.pro_customerName  || '',
           expiresAt:     result.pro_expiresAt     || null,
         });
       }
@@ -65,15 +61,6 @@ async function getProStatus() {
  *       if the user is briefly offline at renewal time.
  */
 async function isPro() {
-  // ── Development / testing shortcut ──────────────────────────────────────
-  // placeholderMode must be false in production builds.
-  if (PRO_CONFIG.placeholderMode) {
-    const { pro_placeholderDeactivated } = await new Promise(r =>
-      chrome.storage.local.get('pro_placeholderDeactivated', r)
-    );
-    return pro_placeholderDeactivated !== true;
-  }
-
   const status = await getProStatus();
 
   // No key stored — definitely not Pro
@@ -150,15 +137,11 @@ async function validateLicense(key, { silent = false, isRevalidation = false } =
     const subscriptionActive = data.valid === true && lsStatus === 'active';
 
     if (subscriptionActive) {
-      const email     = data.meta?.customer_email || '';
-      const name      = data.meta?.customer_name  || '';
       const expiresAt = data.license_key?.expires_at || null;
       await chrome.storage.local.set({
         pro_isPro:          true,
         pro_licenseKey:     key,
         pro_validatedAt:    Date.now(),
-        pro_customerEmail:  email,
-        pro_customerName:   name,
         pro_expiresAt:      expiresAt,
       });
       return { ok: true };
@@ -228,11 +211,6 @@ async function activateLicense(key) {
     return { success: false, message: 'Please enter a license key.' };
   }
 
-  if (PRO_CONFIG.placeholderMode) {
-    await chrome.storage.local.remove('pro_placeholderDeactivated');
-    return { success: true, message: 'PRO activated!' };
-  }
-
   const trimmedKey = key.trim();
 
   // ── Activate the license with LemonSqueezy first ──────────────────────
@@ -298,44 +276,19 @@ async function revokePro() {
   // Clear Pro status flags but intentionally keep pro_licenseKey so the user
   // can re-validate automatically once their subscription is renewed.
   await chrome.storage.local.remove([
-    'pro_isPro', 'pro_validatedAt',
-    'pro_customerEmail', 'pro_customerName', 'pro_expiresAt',
-  ]);
-  if (PRO_CONFIG.placeholderMode) {
-    await chrome.storage.local.set({ pro_placeholderDeactivated: true });
-  }
-}
-
-/**
- * Fully remove all Pro data including the stored license key.
- * Used when the user explicitly clicks "Remove license" in the status modal.
- */
-async function fullyRevokePro() {
-  await chrome.storage.local.remove([
-    'pro_isPro', 'pro_licenseKey', 'pro_validatedAt',
-    'pro_customerEmail', 'pro_customerName', 'pro_expiresAt',
-    'pro_placeholderDeactivated',
+    'pro_isPro', 'pro_validatedAt', 'pro_expiresAt',
   ]);
 }
 
-// ── Feature Gating Helpers ─────────────────────────────────────────────────
-
-/** Feature IDs gated behind Pro. */
-const PRO_FEATURES = new Set([
-  'correlation',   // Correlation matrix
-  'export',        // CSV export buttons
-  'stockChart',    // Individual stock price charts
-]);
-
-/**
- * Check if a specific feature is available for the current user.
- * @param {string} featureId
- * @returns {Promise<boolean>}
- */
-async function isFeatureAvailable(featureId) {
-  if (!PRO_FEATURES.has(featureId)) return true;
-  return await isPro();
-}
+// ── Feature Gating ─────────────────────────────────────────────────────────
+//
+// Features behind Pro: correlation matrix, CSV export, individual stock price
+// charts, tax reporting tables, per-holding dividend breakdown.
+//
+// Each render function gates itself by checking the `proUnlocked` flag that
+// dashboard.js sets once per render from isPro(), then blurs its placeholder
+// content and calls showProOverlay(). There is deliberately no feature
+// registry — the check lives next to the UI it protects.
 
 /**
  * Show a Pro upgrade overlay on a container element.
@@ -449,12 +402,6 @@ async function showProStatusModal() {
             <span class="pro-status-label">Status</span>
             <span class="pro-status-val pro-status-active">● Active</span>
           </div>
-          ${status.customerName
-            ? `<div class="pro-status-row"><span class="pro-status-label">Name</span><span class="pro-status-val">${status.customerName}</span></div>`
-            : ''}
-          ${status.customerEmail
-            ? `<div class="pro-status-row"><span class="pro-status-label">Account</span><span class="pro-status-val" style="font-size:12px">${status.customerEmail}</span></div>`
-            : ''}
           ${renewalLine}
           <div class="pro-status-row">
             <span class="pro-status-label">Last verified</span>
@@ -463,7 +410,6 @@ async function showProStatusModal() {
         </div>
       </div>
       <div class="pro-modal-footer">
-        <button class="pro-modal-btn pro-modal-btn--danger" id="proStatusRemove" title="Remove stored license key and deactivate PRO">Remove licence</button>
         <button class="pro-modal-btn pro-modal-btn--secondary" id="proStatusClose">Close</button>
       </div>
     </div>
@@ -476,13 +422,7 @@ async function showProStatusModal() {
     modal.remove();
   });
 
-  modal.querySelector('#proStatusRemove').addEventListener('click', async e => {
-    e.stopPropagation();
-    if (!confirm('Remove your Sharpe PRO licence from this device? You can re-enter your key at any time.')) return;
-    await fullyRevokePro();
-    modal.remove();
-    location.reload();
-  });
+
 
   modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
 }

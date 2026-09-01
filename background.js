@@ -1,4 +1,7 @@
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // Only accept messages from our own extension (content scripts + extension pages)
+  if (sender.id !== chrome.runtime.id) return;
+
   if (message.type === 'FETCH_ALL') {
     fetchViaContentScript().then(sendResponse);
     return true;
@@ -41,7 +44,9 @@ self.addEventListener('activate', () => evictStaleCacheEntries(7 * 24 * 3600e3))
 const PORTFOLIO_DATA_KEYS = [
   'portfolio', 'dividends', 'transactions', 'account',
   'intAccount', 'productInfo', 'currentUrl',
-  'scrapedDailyPnL', 'scrapedTotalPnL', 'scrapedPortfolioValue',
+  'scrapedDailyPnL', 'scrapedDailyPnLPerPosition', 'scrapedTotalPnL', 'scrapedPortfolioValue',
+  'favouriteLists', 'favouriteProductIds', 'favouriteProductInfo',
+  'todayPLSnapshots', 'todayPLSnapshotsDate',
 ];
 const PORTFOLIO_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
 
@@ -53,7 +58,10 @@ async function evictStaleCacheEntries(maxAgeMs) {
 
     // ── Price history cache eviction ────────────────────────────────────
     for (const [key, val] of Object.entries(all)) {
-      if (key.startsWith('priceCache_') && val?.ts && (now - val.ts) > maxAgeMs) {
+      if (!key.startsWith('priceCache_')) continue;
+      // Remove legacy cache entries (v1/v2/v3) unconditionally
+      if (!key.startsWith('priceCache_v4_')) { keysToRemove.push(key); continue; }
+      if (val?.ts && (now - val.ts) > maxAgeMs) {
         keysToRemove.push(key);
       }
     }
@@ -88,22 +96,51 @@ async function fetchPriceHistoryCached(vwdIds, period) {
   // Within the same day, cache for up to 4h (long periods) or 1h (short periods).
   // Use local date (not UTC) to avoid cache invalidating at midnight UTC instead of local midnight.
   const today = (() => { const d = new Date(); return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10); })();
-  const cacheKey = 'priceCache_' + period + '_' + today;
+  // Include a fingerprint of the requested product IDs so different sets (portfolio vs watchlist) get separate caches
+  const idKeys = Object.keys(vwdIds || {}).sort();
+  // Use a simple hash of all IDs to avoid cache collisions between different product sets
+  const idsFp = idKeys.length + '_' + idKeys.reduce((h, id) => ((h << 5) - h + id.split('').reduce((a, c) => ((a << 5) - a + c.charCodeAt(0)) | 0, 0)) | 0, 0).toString(36);
+  const cacheKey = 'priceCache_v4_' + period + '_' + today + '_' + idsFp;
   const maxAge = period === '1Y' || period === '5Y' ? 4 * 3600e3 : 3600e3; // 4h for long periods, 1h for short
+  let existingEntry = null;
   try {
     const cached = await chrome.storage.local.get([cacheKey]);
-    const entry = cached[cacheKey];
-    if (entry && Date.now() - entry.ts < maxAge) {
-      console.log('[BG] Using cached price history for', period);
-      return entry.data;
+    existingEntry = cached[cacheKey] || null;
+    if (existingEntry && Date.now() - existingEntry.ts < maxAge) {
+      // Check completeness: if any requested IDs are missing from cache, force refresh.
+      // Benchmarks are appended to every response by fetchPriceHistory (they are never
+      // part of the request), so they must be checked explicitly — otherwise one
+      // transient benchmark fetch failure gets latched into the cache for hours and
+      // every chart silently loses its S&P 500 comparison.
+      const cachedIds = new Set(Object.keys(existingEntry.data || {}));
+      const missingIds = idKeys.filter(id => !cachedIds.has(id));
+      const missingBench = ['__SP500__', '__EUROSTOXX__', '__NASDAQ__']
+        .filter(k => !(existingEntry.data?.[k]?.length));
+      const missing = [...missingIds, ...missingBench];
+      if (missing.length === 0) {
+        console.log('[BG] Using cached price history for', period);
+        return existingEntry.data;
+      }
+      console.log('[BG] Cache hit but missing', missing.length, 'IDs — refetching:', missing.slice(0, 5));
     }
   } catch(e) { console.error('[BG] Cache read failed:', e); }
   console.log('[BG] Fetching fresh price history for', period);
-  const data = await fetchPriceHistory(vwdIds, period);
+  const freshData = await fetchPriceHistory(vwdIds, period);
+
+  // Merge with existing cache: if some fetches failed (rate limit / timeout),
+  // keep previously successful data for those IDs instead of losing them.
+  let merged = freshData;
+  const prevData = existingEntry?.data;
+  if (prevData && typeof prevData === 'object') {
+    merged = { ...prevData, ...freshData };
+    const kept = Object.keys(prevData).filter(k => !freshData[k] && prevData[k]);
+    if (kept.length) console.log('[BG] Kept', kept.length, 'cached entries for IDs that failed to refresh:', kept);
+  }
+
   try {
-    await chrome.storage.local.set({ [cacheKey]: { ts: Date.now(), data } });
+    await chrome.storage.local.set({ [cacheKey]: { ts: Date.now(), data: merged } });
   } catch(e) { console.error('[BG] Cache write failed (storage quota?):', e); }
-  return data;
+  return merged;
 }
 
 async function fetchPriceHistory(vwdIds, period) {
@@ -111,28 +148,33 @@ async function fetchPriceHistory(vwdIds, period) {
   const vwdPeriod = periodMap[period] || period;
   const priceHistories = {};
 
-  // Build task list: all positions + S&P 500
+  // Build task list: all positions + benchmarks
+  const BENCHMARKS = [
+    { key: '__SP500__',      vwdId: '480012040', label: 'S&P 500' },
+    { key: '__EUROSTOXX__',  vwdId: '360015511', label: 'Euro Stoxx 50' },
+    { key: '__NASDAQ__',     vwdId: '480012041', label: 'Nasdaq 100' },
+  ];
   const entries = Object.entries(vwdIds);
-  const sp500Task = async () => {
+  const benchmarkTasks = BENCHMARKS.map(bm => async () => {
     try {
       const res = await fetch(
-        `https://charting.vwdservices.com/hchart/v1/deGiro/data.js?requestid=2&period=${vwdPeriod}&series=price:issueid:480012040&userToken=1&resolution=1d`
+        `https://charting.vwdservices.com/hchart/v1/deGiro/data.js?requestid=2&period=${vwdPeriod}&series=price:issueid:${bm.vwdId}&userToken=1&resolution=1d`
       );
-      console.log('[BG] SP500 status:', res.status);
+      console.log(`[BG] ${bm.label} status:`, res.status);
       if (res.ok) {
         const text = await res.text();
         const json = JSON.parse(text);
-        priceHistories['__SP500__'] = parseVwdSeries(json);
-        console.log('[BG] SP500 points:', priceHistories['__SP500__'].length);
+        priceHistories[bm.key] = parseVwdSeries(json);
+        console.log(`[BG] ${bm.label} points:`, priceHistories[bm.key].length);
       }
-    } catch(e) { console.warn('[BG] SP500 fetch failed:', e.message); }
-  };
+    } catch(e) { console.warn(`[BG] ${bm.label} fetch failed:`, e.message); }
+  });
 
   // Rate-limited fetch: process in batches of 4 with 150ms between batches
   const BATCH_SIZE = 4;
   const BATCH_DELAY_MS = 150;
   let completed = 0;
-  const total = entries.length + 1; // +1 for S&P
+  const total = entries.length + BENCHMARKS.length;
 
   const fetchOne = async ([id, { vwdId, type }]) => {
     try {
@@ -155,10 +197,27 @@ async function fetchPriceHistory(vwdIds, period) {
     if (i + BATCH_SIZE < entries.length) await new Promise(r => setTimeout(r, BATCH_DELAY_MS));
   }
 
-  // Fetch S&P 500 after positions
-  await sp500Task();
-  completed++;
-  chrome.runtime.sendMessage({ type: 'FETCH_PROGRESS', completed, total }).catch(() => {});
+  // Retry pass: any positions that failed on the first attempt get a second chance
+  // (rate limits / transient timeouts are the most common cause of missing data)
+  const failedEntries = entries.filter(([id]) => !priceHistories[id]);
+  if (failedEntries.length > 0) {
+    console.log('[BG] Retrying', failedEntries.length, 'failed positions:', failedEntries.map(([id]) => id));
+    await new Promise(r => setTimeout(r, 500)); // longer pause before retry
+    for (let i = 0; i < failedEntries.length; i += BATCH_SIZE) {
+      const batch = failedEntries.slice(i, i + BATCH_SIZE);
+      await Promise.all(batch.map(fetchOne));
+      if (i + BATCH_SIZE < failedEntries.length) await new Promise(r => setTimeout(r, BATCH_DELAY_MS));
+    }
+    const stillFailed = failedEntries.filter(([id]) => !priceHistories[id]);
+    if (stillFailed.length) console.warn('[BG] Still failed after retry:', stillFailed.map(([id]) => id));
+  }
+
+  // Fetch benchmarks after positions
+  await Promise.all(benchmarkTasks.map(async task => {
+    await task();
+    completed++;
+    chrome.runtime.sendMessage({ type: 'FETCH_PROGRESS', completed, total }).catch(() => {});
+  }));
 
   return priceHistories;
 }
@@ -169,17 +228,27 @@ function parseVwdSeries(json) {
     console.log('[BG] parseVwdSeries: series count:', series.length, 'types:', series.map(s=>s.type||'?'));
     const priceSeries = series.find(s => s.data);
     if (!priceSeries?.data) { console.log('[BG] no priceSeries found'); return []; }
-    const startDate = new Date(json.start);
+    // VWD sends `start` as a CET/CEST date string or timestamp.
+    // Parse it and use UTC noon to avoid any timezone-induced day shifts.
+    // Adding offset days in UTC guarantees the calendar date stays correct
+    // regardless of the user's local timezone.
+    const raw = json.start;
+    let startMs;
+    if (typeof raw === 'string' && /^\d{4}-\d{2}-\d{2}/.test(raw)) {
+      // Date string like "2021-03-29" — parse as UTC noon
+      const [y, m, d] = raw.split(/[-T]/);
+      startMs = Date.UTC(+y, +m - 1, +d, 12, 0, 0);
+    } else {
+      // Timestamp (ms or s) — snap to UTC noon of that day
+      const ts = typeof raw === 'number' ? (raw < 1e12 ? raw * 1000 : raw) : new Date(raw).getTime();
+      const tmp = new Date(ts);
+      startMs = Date.UTC(tmp.getUTCFullYear(), tmp.getUTCMonth(), tmp.getUTCDate(), 12, 0, 0);
+    }
     return priceSeries.data.map(([offset, price]) => {
-      const d = new Date(startDate);
-      d.setDate(d.getDate() + offset);
-      // Use local date parts instead of toISOString() (which is UTC).
-      // VWD dates represent exchange trading days in CET — using UTC can shift
-      // dates back by one day for timezones ahead of UTC, causing the latest
-      // trading day to collide with the previous day and get lost.
-      const yyyy = d.getFullYear();
-      const mm   = String(d.getMonth() + 1).padStart(2, '0');
-      const dd   = String(d.getDate()).padStart(2, '0');
+      const d = new Date(startMs + offset * 864e5);
+      const yyyy = d.getUTCFullYear();
+      const mm   = String(d.getUTCMonth() + 1).padStart(2, '0');
+      const dd   = String(d.getUTCDate()).padStart(2, '0');
       return { date: `${yyyy}-${mm}-${dd}`, price };
     }).filter(d => d.price != null);
   } catch(e) { return []; }
@@ -215,8 +284,15 @@ async function fetchViaContentScript() {
 
     // Scraped real-time values from DEGIRO's rendered DOM
     if (data.scrapedDailyPnL !== undefined) toStore.scrapedDailyPnL = data.scrapedDailyPnL;
+    if (data.scrapedDailyPnLPerPosition !== undefined) toStore.scrapedDailyPnLPerPosition = data.scrapedDailyPnLPerPosition;
+    if (data.scrapedTotalPnLPerPosition !== undefined) toStore.scrapedTotalPnLPerPosition = data.scrapedTotalPnLPerPosition;
     if (data.scrapedTotalPnL !== undefined) toStore.scrapedTotalPnL = data.scrapedTotalPnL;
     if (data.scrapedPortfolioValue !== undefined) toStore.scrapedPortfolioValue = data.scrapedPortfolioValue;
+
+    // Favourites / watchlist
+    if (data.favouriteLists) toStore.favouriteLists = data.favouriteLists;
+    if (data.favouriteProductIds) toStore.favouriteProductIds = data.favouriteProductIds;
+    if (data.favouriteProductInfo) toStore.favouriteProductInfo = data.favouriteProductInfo;
 
     await chrome.storage.local.set(toStore);
     return { ok: true };

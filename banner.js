@@ -132,7 +132,10 @@
   // ── Wire button actions ───────────────────────────────────────────────
  
   shadow.querySelector('.banner-open').addEventListener('click', () => {
-    chrome.runtime.sendMessage({ type: 'OPEN_DASHBOARD' }).catch(() => {});
+    try {
+      if (!chrome.runtime?.id) { removeBanner(); return; }
+      chrome.runtime.sendMessage({ type: 'OPEN_DASHBOARD' }).catch(() => {});
+    } catch (_) { removeBanner(); }
   });
  
   function removeBanner() {

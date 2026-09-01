@@ -19,6 +19,91 @@ const COLORS = [
   '#F472B6', // pink
 ];
 
+// ── Theme system ──────────────────────────────────────────────────
+let _currentTheme = 'dark';
+
+function getTheme() { return _currentTheme; }
+function isLight() { return _currentTheme === 'light'; }
+
+function applyTheme(theme) {
+  _currentTheme = theme;
+  if (theme === 'light') document.documentElement.dataset.theme = 'light';
+  else delete document.documentElement.dataset.theme;
+  // Update toggle icon
+  const icon = document.getElementById('themeIcon');
+  if (icon) {
+    icon.innerHTML = theme === 'light'
+      ? '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>'   // moon
+      : '<circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>';
+  }
+  try { chrome.storage.sync.set({ sharpeTheme: theme, sharpeThemeExplicit: true }); } catch(e) {}
+}
+
+async function initTheme() {
+  try {
+    const stored = await new Promise(r => chrome.storage.sync.get(['sharpeTheme', 'sharpeThemeExplicit'], r));
+    if (stored.sharpeTheme) {
+      applyTheme(stored.sharpeTheme);
+    } else if (window.matchMedia('(prefers-color-scheme: light)').matches) {
+      _currentTheme = 'light';
+      document.documentElement.dataset.theme = 'light';
+    }
+  } catch(e) {}
+  // Listen for system preference changes (only if user hasn't explicitly chosen)
+  try {
+    window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', e => {
+      chrome.storage.sync.get('sharpeThemeExplicit', result => {
+        if (!result.sharpeThemeExplicit) applyTheme(e.matches ? 'light' : 'dark');
+      });
+    });
+  } catch(e) {}
+}
+
+// Theme-aware color palette for Chart.js configs, canvas drawing, and inline styles.
+// Colors that are semantic (benchmark, grade scale, COLORS palette) stay the same.
+//
+// P&L green/red are read from the stylesheet's --green/--red at draw time so a
+// chart line and the table cell below it are literally the same colour. Falls
+// back to the previous literals if the custom property is missing or non-hex
+// (e.g. a surface that loads utils.js without the dashboard stylesheet).
+function cssHex(name, fallback) {
+  try {
+    const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    return /^#[0-9a-fA-F]{6}$/.test(v) ? v : fallback;
+  } catch (e) { return fallback; }
+}
+
+const THEME_COLORS = {
+  get tooltipBg()     { return isLight() ? '#FFFFFF'  : '#1E2C3A'; },
+  get tooltipBorder() { return isLight() ? '#D1D5DB'  : '#2A3A4A'; },
+  get tooltipTitle()  { return isLight() ? '#111827'  : '#F5F7FA'; },
+  get tooltipBody()   { return isLight() ? '#6B7280'  : '#8B9BB4'; },
+  get tickColor()     { return isLight() ? '#6B7280'  : '#8B9BB4'; },
+  get gridColor()     { return isLight() ? 'rgba(107,114,128,0.18)' : 'rgba(139,155,180,0.14)'; },
+  get plGreen()       { return cssHex('--green', isLight() ? '#16A34A' : '#2ACA69'); },
+  get plRed()         { return cssHex('--red',   isLight() ? '#DC2626' : '#FF4757'); },
+  get pieBorderColor(){ return isLight() ? '#F7F5F0'  : '#15202B'; },
+  get corrNeutral()   { return isLight() ? [240,242,245] : [30,44,58]; },
+  get canvasBaseline()     { return isLight() ? 'rgba(0,0,0,0.12)'   : 'rgba(255,255,255,0.18)'; },
+  get canvasBaselineLabel(){ return isLight() ? 'rgba(0,0,0,0.25)'   : 'rgba(255,255,255,0.30)'; },
+  get canvasBaselineFaint(){ return isLight() ? 'rgba(0,0,0,0.06)'   : 'rgba(255,255,255,0.07)'; },
+  get canvasBaselineMed()  { return isLight() ? 'rgba(0,0,0,0.18)'   : 'rgba(255,255,255,0.35)'; },
+  get canvasCrashFill()    { return isLight() ? 'rgba(220,38,38,0.35)' : 'rgba(239,83,80,0.5)'; },
+  get canvasCrashFillHi()  { return isLight() ? 'rgba(220,38,38,0.7)'  : 'rgba(239,83,80,0.92)'; },
+  get canvasRecoveryFill() { return isLight() ? 'rgba(22,163,74,0.3)'  : 'rgba(76,175,80,0.4)'; },
+  get annotationBg()       { return isLight() ? '#F8F9FB' : '#0e0e1a'; },
+  get annotationLine()     { return isLight() ? '#9CA3AF' : '#3a3a4a'; },
+  get zeroLineColor()      { return isLight() ? 'rgba(17,24,39,0.4)' : 'rgba(245,247,250,0.5)'; },
+  plGreenAlpha(a) { const hex = Math.round(a * 255).toString(16).padStart(2, '0'); return this.plGreen + hex; },
+  plRedAlpha(a)   { const hex = Math.round(a * 255).toString(16).padStart(2, '0'); return this.plRed + hex; },
+  themeTooltip() {
+    return {
+      backgroundColor: this.tooltipBg, borderColor: this.tooltipBorder, borderWidth: 1,
+      titleColor: this.tooltipTitle, bodyColor: this.tooltipBody, padding: 10,
+    };
+  },
+};
+
 // All known DEGIRO cash/sweep account ID conventions across regional platforms.
 // These are excluded from position analysis and treated as uninvested cash.
 const CASH_IDS = new Set([
@@ -219,7 +304,8 @@ function extractProductMeta(productInfo) {
       productTypeId: prod.productTypeId ?? undefined,
       isin: prod.isin || '',
     };
-    if (prod.vwdId) vwdIds[String(id)] = { vwdId: prod.vwdId, type: prod.vwdIdentifierType };
+    const vwdKey = prod.vwdId || prod.vwdIdSecondary;
+    if (vwdKey) vwdIds[String(id)] = { vwdId: vwdKey, type: prod.vwdIdentifierType || prod.vwdIdentifierTypeSecondary };
   });
   return { meta, vwdIds };
 }
@@ -245,7 +331,7 @@ function extractPositions(portfolio, meta, transactions) {
       for (const tx of buys) {
         const nativeVal = Math.abs(tx.quantity) * tx.price;
         // Subtract fees for a cleaner FX rate
-        const fees = Math.abs(tx.totalFeesInBaseCurrency || 0) + Math.abs(tx.autoFxFeeInBaseCurrency || 0);
+        const fees = txFeeEur(tx);
         const eurVal = Math.abs(tx.totalInBaseCurrency) - fees;
         nativeTotal += nativeVal;
         eurTotal    += eurVal;
@@ -283,13 +369,15 @@ function extractPositions(portfolio, meta, transactions) {
       // (price - breakEvenPrice) × size × fxRate.
       const eurUnrealizedRaw =
         f.totalPlInBaseCurrency ?? f.totalPl ?? f.unrealizedPl ?? undefined;
-      const unrealized = eurUnrealizedRaw !== undefined
+      let unrealized = eurUnrealizedRaw !== undefined
         ? eurUnrealizedRaw
         : (nativePrice - bep) * nativeSize * currentFX;
+      if (!isFinite(unrealized)) unrealized = 0;
 
       const pl = unrealized + realized;
       const costBasis = eurValue - unrealized;
-      const plPct = costBasis > 0 ? (unrealized / costBasis) * 100 : 0;
+      let plPct = costBasis > 0 ? (unrealized / costBasis) * 100 : 0;
+      if (!isFinite(plPct)) plPct = 0;
 
       // ── Currency Effect ─────────────────────────────────────────────
       // plFx = currentPrice × size × (currentFX − purchaseFX)
@@ -357,6 +445,7 @@ function extractDividends(d, names) {
     const product = (names && x.product && names[x.product]) || x.product || '';
     return {
       product,
+      productId: x.product != null ? String(x.product) : '',
       amount:    amt,
       amountEUR: parseFloat(x.amountInBaseCurr) || amt,
       currency:  x.currency || 'EUR',
@@ -365,6 +454,95 @@ function extractDividends(d, names) {
   })
   .filter(x => x.date && x.amount > 0)
   .sort((a, b) => b.date.localeCompare(a.date));
+}
+
+// ── Holdings replay ────────────────────────────────────────────────
+//
+// Using today's position sizes for past dates is wrong: the current size gets
+// applied retroactively to every earlier day, producing fake jumps around any
+// buy or sell. Replaying the transaction log is the only correct way.
+
+/**
+ * Replay transactions into a chronological list of holdings snapshots.
+ * @returns {Array<{date: string, holdings: Object<string, number>}>}
+ */
+function buildHoldingSnapshots(transactions) {
+  const txList = (transactions || [])
+    .filter(tx => tx.productId && tx.buysell && tx.quantity)
+    .map(tx => ({
+      id:      String(tx.productId),
+      date:    (tx.date || '').slice(0, 10),
+      buysell: tx.buysell,
+      qty:     Math.abs(tx.quantity),
+    }))
+    .filter(tx => tx.date)
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  const snapshots = [];
+  const running = {};
+  txList.forEach(tx => {
+    running[tx.id] = (running[tx.id] || 0) + (tx.buysell === 'B' ? tx.qty : -tx.qty);
+    if (running[tx.id] < 0.001) delete running[tx.id];
+    snapshots.push({ date: tx.date, holdings: { ...running } });
+  });
+  return snapshots;
+}
+
+/**
+ * Holdings as of a date — the last snapshot on or before it. Binary search.
+ * Returns a fresh object the caller may mutate; {} when nothing applies yet.
+ */
+function holdingsAsOf(snapshots, date) {
+  let lo = 0, hi = (snapshots?.length || 0) - 1, best = null;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (snapshots[mid].date <= date) { best = snapshots[mid].holdings; lo = mid + 1; }
+    else hi = mid - 1;
+  }
+  return best ? { ...best } : {};
+}
+
+// ── Shared portfolio statistics ────────────────────────────────────
+// Used by both the dashboard and the popup so the two surfaces can never
+// disagree on a figure.
+
+/** Total dividend income in EUR from an extracted dividend array. */
+function sumDividends(dividends) {
+  return (dividends || []).reduce((s, d) => s + (d.amountEUR || 0), 0);
+}
+
+/** Total commission + FX fee for one transaction, in EUR. Accepts raw or extracted rows. */
+function txFeeEur(tx) {
+  return Math.abs(parseFloat(tx.totalFeesInBaseCurrency) || 0)
+       + Math.abs(parseFloat(tx.autoFxFeeInBaseCurrency) || 0);
+}
+
+/** Realised P&L across all closed/partially-closed positions. */
+function sumRealized(closed) {
+  return (closed || []).reduce((s, cp) => s + cp.realizedPL, 0);
+}
+
+/**
+ * Currency (FX) effect: unrealised on open non-EUR positions (p.plFx, computed
+ * in extractPositions) plus realised FX on sold lots (from the FIFO walk).
+ * @returns {{unrealizedFxPL, realizedFxPL, totalFxPL, fxPositions, closedFxCount}}
+ */
+function computeFxEffect(positions, closed) {
+  let unrealizedFxPL = 0, fxPositions = 0;
+  (positions || []).forEach(p => {
+    if (p.currency === 'EUR') return;
+    unrealizedFxPL += p.plFx || 0;
+    fxPositions++;
+  });
+  let realizedFxPL = 0, closedFxCount = 0;
+  (closed || []).forEach(cp => {
+    if (cp.realizedFxPL) { realizedFxPL += cp.realizedFxPL; closedFxCount++; }
+  });
+  return {
+    unrealizedFxPL, realizedFxPL,
+    totalFxPL: unrealizedFxPL + realizedFxPL,
+    fxPositions, closedFxCount,
+  };
 }
 
 /**
@@ -402,6 +580,10 @@ function computeClosedPositions(transactions, names, meta) {
   });
 
   const closed = [];
+  // Per-sell realised gain events, in the same FIFO walk — consumers that need
+  // a cumulative realised-gains time series read these instead of re-walking
+  // the whole history with a second (drift-prone) copy of this algorithm.
+  const gainEvents = []; // [{date, gain}]
 
   Object.entries(byProduct).forEach(([id, txs]) => {
     const sorted = [...txs].sort((a, b) => a.date.localeCompare(b.date));
@@ -423,7 +605,7 @@ function computeClosedPositions(transactions, names, meta) {
       const qty = Math.abs(tx.quantity);
       const eurPerShare = qty > 0 ? Math.abs(tx.totalInBaseCurrency) / qty : 0;
       const nativePrice = tx.price;
-      const fees = Math.abs(tx.totalFeesInBaseCurrency || 0) + Math.abs(tx.autoFxFeeInBaseCurrency || 0);
+      const fees = txFeeEur(tx);
       const eurExFees = Math.abs(tx.totalInBaseCurrency) - fees;
       const impliedFX = (nativePrice > 0 && qty > 0 && eurExFees > 0)
         ? eurExFees / (nativePrice * qty)
@@ -437,9 +619,11 @@ function computeClosedPositions(transactions, names, meta) {
         netQty -= qty;
         const sellFX = impliedFX;
         let remaining = qty;
+        let costBasisThisSell = 0;
         while (remaining > 0.0001 && buyQueue.length > 0) {
           const lot = buyQueue[0];
           const matched = Math.min(lot.qty, remaining);
+          costBasisThisSell += matched * lot.eurPerShare;
           totalBuyCostEUR += matched * lot.eurPerShare;
           totalSoldQty += matched;
           if (isNonEUR && lot.nativePrice > 0) {
@@ -449,7 +633,9 @@ function computeClosedPositions(transactions, names, meta) {
           remaining -= matched;
           if (lot.qty < 0.0001) buyQueue.shift();
         }
-        totalSellProcEUR += Math.abs(tx.totalInBaseCurrency);
+        const sellProceeds = Math.abs(tx.totalInBaseCurrency);
+        totalSellProcEUR += sellProceeds;
+        gainEvents.push({ date: tx.date, gain: sellProceeds - costBasisThisSell });
       }
     });
 
@@ -472,7 +658,11 @@ function computeClosedPositions(transactions, names, meta) {
     }
   });
 
-  return closed.sort((a, b) => Math.abs(b.realizedPL) - Math.abs(a.realizedPL));
+  const result = closed.sort((a, b) => Math.abs(b.realizedPL) - Math.abs(a.realizedPL));
+  // Carried on the returned array so existing callers are unaffected; read via
+  // `closed.gainEvents` when a chronological realised-gains series is needed.
+  result.gainEvents = gainEvents.sort((a, b) => a.date.localeCompare(b.date));
+  return result;
 }
 
 // ── Formatting ─────────────────────────────────────────────────────
@@ -521,4 +711,26 @@ function downloadCSV(filename, headers, rows) {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
+}
+
+/**
+ * Pearson correlation coefficient between two aligned return arrays.
+ * Null entries are skipped. Returns null if fewer than 10 overlapping points.
+ */
+function pearson(a, b) {
+  const pairs = [];
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== null && b[i] !== null) pairs.push([a[i], b[i]]);
+  }
+  const n = pairs.length;
+  if (n < 10) return null;
+  const meanA = pairs.reduce((s, p) => s + p[0], 0) / n;
+  const meanB = pairs.reduce((s, p) => s + p[1], 0) / n;
+  let num = 0, da = 0, db = 0;
+  for (const [x, y] of pairs) {
+    const dx = x - meanA, dy = y - meanB;
+    num += dx * dy; da += dx * dx; db += dy * dy;
+  }
+  const denom = Math.sqrt(da * db);
+  return denom === 0 ? null : Math.min(1, Math.max(-1, num / denom));
 }
